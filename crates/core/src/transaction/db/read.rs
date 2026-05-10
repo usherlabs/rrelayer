@@ -3,7 +3,9 @@ use crate::{
     postgres::{PostgresClient, PostgresError},
     relayer::RelayerId,
     shared::common_types::{PagingContext, PagingResult},
-    transaction::types::{Transaction, TransactionHash, TransactionId, TransactionStatus},
+    transaction::types::{
+        Transaction, TransactionHash, TransactionId, TransactionNonce, TransactionStatus,
+    },
 };
 
 impl PostgresClient {
@@ -72,6 +74,80 @@ impl PostgresClient {
                     OFFSET $4;
                 ",
                 &[id, status, &(paging_context.limit as i64), &(paging_context.offset as i64)],
+            )
+            .await?;
+
+        let results: Vec<Transaction> =
+            rows.iter().map(build_transaction_from_transaction_view).collect();
+
+        let result_count = results.len();
+
+        Ok(PagingResult::new(results, paging_context.next(result_count), paging_context.previous()))
+    }
+
+    pub async fn get_actionable_transactions_by_status_for_relayer(
+        &self,
+        id: &RelayerId,
+        status: &TransactionStatus,
+        paging_context: &PagingContext,
+    ) -> Result<PagingResult<Transaction>, PostgresError> {
+        let rows = self
+            .query(
+                "
+                    SELECT *
+                    FROM relayer.transaction
+                    WHERE relayer_id = $1
+                    AND status = $2
+                    AND (
+                        $2 <> 'PENDING'::relayer.tx_status
+                        OR failed_at IS NULL
+                        OR hash IS NOT NULL
+                        OR sent_at IS NOT NULL
+                    )
+                    ORDER BY nonce ASC
+                    LIMIT $3
+                    OFFSET $4;
+                ",
+                &[id, status, &(paging_context.limit as i64), &(paging_context.offset as i64)],
+            )
+            .await?;
+
+        let results: Vec<Transaction> =
+            rows.iter().map(build_transaction_from_transaction_view).collect();
+
+        let result_count = results.len();
+
+        Ok(PagingResult::new(results, paging_context.next(result_count), paging_context.previous()))
+    }
+
+    pub async fn get_unbroadcast_future_nonce_pending_transactions_for_relayer(
+        &self,
+        id: &RelayerId,
+        chain_nonce: &TransactionNonce,
+        paging_context: &PagingContext,
+    ) -> Result<PagingResult<Transaction>, PostgresError> {
+        let rows = self
+            .query(
+                "
+                    SELECT *
+                    FROM relayer.transaction
+                    WHERE relayer_id = $1
+                    AND status = $2
+                    AND sent_at IS NOT NULL
+                    AND failed_at IS NULL
+                    AND hash IS NOT NULL
+                    AND nonce > $3
+                    ORDER BY nonce ASC
+                    LIMIT $4
+                    OFFSET $5;
+                ",
+                &[
+                    id,
+                    &TransactionStatus::PENDING,
+                    chain_nonce,
+                    &(paging_context.limit as i64),
+                    &(paging_context.offset as i64),
+                ],
             )
             .await?;
 

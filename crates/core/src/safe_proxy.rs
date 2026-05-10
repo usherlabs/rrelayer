@@ -286,32 +286,7 @@ impl SafeProxyManager {
         _safe_tx: &SafeTransaction,
         _chain_id: u64,
     ) -> Result<Bytes, SafeProxyError> {
-        // let tx_hash = self.get_safe_transaction_hash(safe_address, safe_tx, chain_id)?;
-
-        // let hash_hex = format!("0x{}", hex::encode(tx_hash));
-
-        // Sign the hash as text using the provider's text signing capability
-        // match provider.sign_text(&wallet_index, &hash_hex).await {
-        //     Ok(signature) => {
-        //         // Convert signature to Safe format: r + s + v
-        //         // Safe expects v = recovery_id + 4 for ECDSA signatures
-        //         let mut sig_bytes = Vec::new();
-        //         sig_bytes.extend_from_slice(&signature.r().to_be_bytes::<32>());
-        //         sig_bytes.extend_from_slice(&signature.s().to_be_bytes::<32>());
-        //
-        //         // Safe requires v = recovery_id + 4 for ECDSA signatures
-        //         let recovery_id = if signature.v() { 1u8 } else { 0u8 };
-        //         sig_bytes.push(recovery_id + 4);
-        //
-        //         Ok(sig_bytes.into())
-        //     }
-        //     Err(e) => Err(SafeProxyError::SignatureError(format!(
-        //         "Failed to sign Safe transaction: {}",
-        //         e
-        //     ))),
-        // }
-
-        unimplemented!("Safe signatures are not supported yet.")
+        Err(SafeProxyError::SignatureError("Safe signatures are not supported yet".to_string()))
     }
 
     /// Creates a Safe transaction with proper nonce and signature, ready for execution.
@@ -347,8 +322,103 @@ impl SafeProxyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gas::{BaseGasFeeEstimator, GasEstimatorError, GasEstimatorResult};
+    use crate::provider::EvmProvider;
     use crate::shared::common_types::EvmAddress;
-    use alloy::primitives::address;
+    use crate::wallet::{ImportKeyResult, WalletError, WalletManagerChainId, WalletManagerTrait};
+    use alloy::consensus::TypedTransaction;
+    use alloy::dyn_abi::TypedData;
+    use alloy::primitives::{address, Signature};
+    use alloy::transports::mock::Asserter;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct TestWalletManager;
+
+    #[async_trait]
+    impl WalletManagerTrait for TestWalletManager {
+        async fn create_wallet(
+            &self,
+            _wallet_index: u32,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<EvmAddress, WalletError> {
+            unreachable!("safe signature unsupported test does not create wallets")
+        }
+
+        async fn get_address(
+            &self,
+            _wallet_index: u32,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<EvmAddress, WalletError> {
+            unreachable!("safe signature unsupported test does not read wallet addresses")
+        }
+
+        async fn sign_transaction(
+            &self,
+            _wallet_index: u32,
+            _transaction: &TypedTransaction,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<Signature, WalletError> {
+            unreachable!("safe signature unsupported test does not sign transactions")
+        }
+
+        async fn sign_text(
+            &self,
+            _wallet_index: u32,
+            _text: &str,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<Signature, WalletError> {
+            unreachable!("safe signature unsupported test does not sign text")
+        }
+
+        async fn sign_typed_data(
+            &self,
+            _wallet_index: u32,
+            _typed_data: &TypedData,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<Signature, WalletError> {
+            unreachable!("safe signature unsupported test does not sign typed data")
+        }
+
+        fn supports_blobs(&self) -> bool {
+            false
+        }
+
+        async fn import_existing_key(
+            &self,
+            _key_id: &str,
+            _wallet_index: u32,
+            _chain_id: &ChainId,
+            _expected_address: &EvmAddress,
+        ) -> Result<ImportKeyResult, WalletError> {
+            unreachable!("safe signature unsupported test does not import keys")
+        }
+    }
+
+    struct TestGasEstimator;
+
+    #[async_trait]
+    impl BaseGasFeeEstimator for TestGasEstimator {
+        async fn get_gas_prices(
+            &self,
+            _chain_id: &ChainId,
+        ) -> Result<GasEstimatorResult, GasEstimatorError> {
+            unreachable!("safe signature unsupported test does not estimate gas")
+        }
+
+        fn is_chain_supported(&self, _chain_id: &ChainId) -> bool {
+            true
+        }
+    }
+
+    fn test_provider() -> EvmProvider {
+        EvmProvider::mocked(
+            Asserter::new(),
+            Arc::new(TestWalletManager),
+            Arc::new(TestGasEstimator),
+            ChainId::new(1),
+        )
+    }
 
     #[test]
     fn test_safe_proxy_manager() {
@@ -403,5 +473,22 @@ mod tests {
         assert_eq!(safe_tx.data, data);
         assert_eq!(safe_tx.nonce, nonce);
         assert_eq!(safe_tx.operation, 0); // CALL
+    }
+
+    #[tokio::test]
+    async fn create_safe_signature_returns_signature_error_when_unsupported() {
+        let manager = SafeProxyManager::new(Vec::new());
+        let provider = test_provider();
+        let safe_address = EvmAddress::new(address!("46988BA8250E009DCC5DF543D78E2277E2AA900B"));
+        let safe_tx =
+            SafeTransaction::new(EvmAddress::zero(), U256::ZERO, Bytes::new(), U256::ZERO);
+
+        let result = manager.create_safe_signature(&provider, 0, &safe_address, &safe_tx, 1).await;
+
+        assert!(matches!(
+            result,
+            Err(SafeProxyError::SignatureError(message))
+                if message == "Safe signatures are not supported yet"
+        ));
     }
 }

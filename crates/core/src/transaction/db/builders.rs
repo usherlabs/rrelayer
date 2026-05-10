@@ -23,6 +23,8 @@ pub fn build_transaction_from_transaction_view(row: &Row) -> Transaction {
         queued_at: row.get("queued_at"),
         expires_at: row.get("expires_at"),
         sent_at: row.get("sent_at"),
+        failed_at: row.get("failed_at"),
+        failed_reason: row.get("failed_reason"),
         confirmed_at: row.get("confirmed_at"),
         sent_with_gas: row
             .get::<_, Option<serde_json::Value>>("sent_with_gas")

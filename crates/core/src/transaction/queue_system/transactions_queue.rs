@@ -1,13 +1,17 @@
 use std::{
     collections::{HashMap, VecDeque},
+    num::NonZeroU32,
     sync::Arc,
 };
 
-use super::types::{
-    CompetitionResolutionResult, CompetitionType, CompetitiveTransaction, EditableTransaction,
-    MoveInmempoolTransactionToMinedError, MovePendingTransactionToInmempoolError,
-    SendTransactionGasPriceError, TransactionQueueSendTransactionError, TransactionSentWithRelayer,
-    TransactionsQueueSetup,
+use super::{
+    start::effective_startup_nonce,
+    types::{
+        CompetitionResolutionResult, CompetitionType, CompetitiveTransaction, EditableTransaction,
+        MoveInmempoolTransactionToMinedError, MovePendingTransactionToInmempoolError,
+        SendTransactionGasPriceError, TransactionQueueSendTransactionError,
+        TransactionSentWithRelayer, TransactionsQueueSetup,
+    },
 };
 use crate::transaction::types::{TransactionNonce, TransactionValue};
 use crate::{
@@ -39,6 +43,9 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 use tracing::error;
 use tracing::info;
+
+const FIVE_PERCENT_BUMP_DIVISOR: NonZeroU32 =
+    NonZeroU32::new(20).expect("5% bump divisor is nonzero");
 
 pub struct TransactionsQueue {
     pending_transactions: Mutex<VecDeque<Transaction>>,
@@ -322,6 +329,20 @@ impl TransactionsQueue {
         } else {
             false
         }
+    }
+
+    pub async fn reconcile_nonce_manager_to_actionable_queues(
+        &self,
+        chain_nonce: TransactionNonce,
+    ) -> TransactionNonce {
+        let reconciled_nonce = {
+            let pending_transactions = self.pending_transactions.lock().await;
+            let inmempool_transactions = self.inmempool_transactions.lock().await;
+            effective_startup_nonce(chain_nonce, &pending_transactions, &inmempool_transactions)
+        };
+
+        self.nonce_manager.set_reconciled_nonce(reconciled_nonce).await;
+        reconciled_nonce
     }
 
     pub async fn add_competitor_to_inmempool_transaction(
@@ -786,7 +807,8 @@ impl TransactionsQueue {
                 // Already at SUPER speed, do small percentage bumps
                 if gas_price.max_fee <= sent_gas.max_fee {
                     let old_max_fee = gas_price.max_fee;
-                    gas_price.max_fee = sent_gas.max_fee + (sent_gas.max_fee / 20); // 5% bump
+                    gas_price.max_fee =
+                        sent_gas.max_fee + (sent_gas.max_fee / FIVE_PERCENT_BUMP_DIVISOR);
                     info!(
                         "Small bump max_fee for relayer: {} from {} to {} (5%)",
                         self.relayer.name,
@@ -816,7 +838,8 @@ impl TransactionsQueue {
                     sent_gas.max_fee.into_u128(),
                     self.relayer.name
                 );
-                gas_price.max_fee = sent_gas.max_fee + (sent_gas.max_fee / 20); // 5% bump
+                gas_price.max_fee =
+                    sent_gas.max_fee + (sent_gas.max_fee / FIVE_PERCENT_BUMP_DIVISOR);
             }
 
             if gas_price.max_priority_fee <= sent_gas.max_priority_fee {
@@ -1171,54 +1194,67 @@ impl TransactionsQueue {
             working_transaction.value = TransactionValue::zero();
         }
 
-        // Estimate gas limit by creating a temporary transaction with a high gas limit to avoid failing the estimate
-        let temp_gas_limit = GasLimit::new(10_000_000);
-
-        let temp_transaction_request = if working_transaction.is_blob_transaction() {
-            info!(
-                "Creating blob transaction for gas estimation for relayer: {}",
-                self.relayer.name
-            );
-            let blob_gas_price = self
-                .compute_blob_gas_price_for_transaction(
-                    &working_transaction.speed,
-                    &working_transaction.sent_with_blob_gas,
-                )
-                .await?;
-            working_transaction
-                .to_blob_typed_transaction_with_gas_limit(
-                    Some(&gas_price),
-                    Some(&blob_gas_price),
-                    Some(temp_gas_limit),
-                )
-                .map_err(|e| {
-                    TransactionQueueSendTransactionError::TransactionConversionError(e.to_string())
-                })?
-        } else if self.is_legacy_transactions() {
-            info!(
-                "Creating legacy transaction for gas estimation for relayer: {}",
-                self.relayer.name
-            );
-            working_transaction
-                .to_legacy_typed_transaction_with_gas_limit(Some(&gas_price), Some(temp_gas_limit))
-                .map_err(|e| {
-                    TransactionQueueSendTransactionError::TransactionConversionError(e.to_string())
-                })?
-        } else {
-            info!(
-                "Creating EIP-1559 transaction for gas estimation for relayer: {}",
-                self.relayer.name
-            );
-            working_transaction
-                .to_eip1559_typed_transaction_with_gas_limit(Some(&gas_price), Some(temp_gas_limit))
-                .map_err(|e| {
-                    TransactionQueueSendTransactionError::TransactionConversionError(e.to_string())
-                })?
-        };
-
         let mut estimated_gas_limit = if let Some(gas_limit) = transaction.gas_limit {
             gas_limit
         } else {
+            // EvmProvider removes this placeholder before eth_estimateGas; keep it
+            // tiny so it cannot be confused with an estimation cap.
+            let placeholder_gas_limit = GasLimit::new(1);
+
+            let temp_transaction_request = if working_transaction.is_blob_transaction() {
+                info!(
+                    "Creating blob transaction for gas estimation for relayer: {}",
+                    self.relayer.name
+                );
+                let blob_gas_price = self
+                    .compute_blob_gas_price_for_transaction(
+                        &working_transaction.speed,
+                        &working_transaction.sent_with_blob_gas,
+                    )
+                    .await?;
+                working_transaction
+                    .to_blob_typed_transaction_with_gas_limit(
+                        Some(&gas_price),
+                        Some(&blob_gas_price),
+                        Some(placeholder_gas_limit),
+                    )
+                    .map_err(|e| {
+                        TransactionQueueSendTransactionError::TransactionConversionError(
+                            e.to_string(),
+                        )
+                    })?
+            } else if self.is_legacy_transactions() {
+                info!(
+                    "Creating legacy transaction for gas estimation for relayer: {}",
+                    self.relayer.name
+                );
+                working_transaction
+                    .to_legacy_typed_transaction_with_gas_limit(
+                        Some(&gas_price),
+                        Some(placeholder_gas_limit),
+                    )
+                    .map_err(|e| {
+                        TransactionQueueSendTransactionError::TransactionConversionError(
+                            e.to_string(),
+                        )
+                    })?
+            } else {
+                info!(
+                    "Creating EIP-1559 transaction for gas estimation for relayer: {}",
+                    self.relayer.name
+                );
+                working_transaction
+                    .to_eip1559_typed_transaction_with_gas_limit(
+                        Some(&gas_price),
+                        Some(placeholder_gas_limit),
+                    )
+                    .map_err(|e| {
+                        TransactionQueueSendTransactionError::TransactionConversionError(
+                            e.to_string(),
+                        )
+                    })?
+            };
+
             self.estimate_gas(&temp_transaction_request, working_transaction.is_noop)
                 .await
                 .map_err(TransactionQueueSendTransactionError::TransactionEstimateGasError)?
@@ -1384,6 +1420,13 @@ impl TransactionsQueue {
         }
 
         Ok(receipt)
+    }
+
+    pub async fn transaction_exists(
+        &self,
+        transaction_hash: &TransactionHash,
+    ) -> Result<bool, RpcError<TransportErrorKind>> {
+        self.evm_provider.transaction_exists(transaction_hash).await
     }
 
     pub async fn get_nonce(&self) -> Result<TransactionNonce, RpcError<TransportErrorKind>> {

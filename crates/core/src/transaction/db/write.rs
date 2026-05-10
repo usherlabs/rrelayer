@@ -17,6 +17,20 @@ use serde_json;
 
 const TRANSACTION_TABLES: [&str; 2] = ["relayer.transaction", "relayer.transaction_audit_log"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepairedPoisonedPendingTransactions {
+    pub count: i64,
+    pub min_nonce: Option<TransactionNonce>,
+    pub max_nonce: Option<TransactionNonce>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepairedUnbroadcastFutureNoncePendingTransactions {
+    pub count: i64,
+    pub min_nonce: Option<TransactionNonce>,
+    pub max_nonce: Option<TransactionNonce>,
+}
+
 impl PostgresClient {
     pub async fn save_transaction(
         &mut self,
@@ -150,13 +164,34 @@ impl PostgresClient {
     ) -> Result<(), PostgresError> {
         let mut conn = self.pool.get().await?;
         let trans = conn.transaction().await.map_err(PostgresError::PgError)?;
+        let failed_status = transaction.failed_on_send_status();
+        let truncated_reason = failed_reason.chars().take(2000).collect::<String>();
 
-        for table_name in TRANSACTION_TABLES.iter() {
-            trans.execute(
-                format!("
-                INSERT INTO {}(id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, speed, status, expires_at, queued_at, failed_at, failed_reason, external_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15);
-                ", table_name).as_str(),
+        trans
+            .execute(
+                "
+                INSERT INTO relayer.transaction(
+                    id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, speed,
+                    status, expires_at, queued_at, failed_at, failed_reason, external_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15)
+                ON CONFLICT (id) DO UPDATE
+                SET relayer_id = EXCLUDED.relayer_id,
+                    \"to\" = EXCLUDED.\"to\",
+                    \"from\" = EXCLUDED.\"from\",
+                    nonce = EXCLUDED.nonce,
+                    chain_id = EXCLUDED.chain_id,
+                    data = EXCLUDED.data,
+                    value = EXCLUDED.value,
+                    blobs = EXCLUDED.blobs,
+                    speed = EXCLUDED.speed,
+                    status = EXCLUDED.status,
+                    expires_at = EXCLUDED.expires_at,
+                    queued_at = EXCLUDED.queued_at,
+                    failed_at = EXCLUDED.failed_at,
+                    failed_reason = EXCLUDED.failed_reason,
+                    external_id = EXCLUDED.external_id;
+                ",
                 &[
                     &transaction.id,
                     &relayer_id,
@@ -168,16 +203,45 @@ impl PostgresClient {
                     &transaction.value,
                     &transaction.blobs,
                     &transaction.speed,
-                    &transaction.status,
+                    &failed_status,
                     &transaction.expires_at,
                     &transaction.queued_at,
-                    &failed_reason.chars().take(2000).collect::<String>(),
+                    &truncated_reason,
                     &transaction.external_id,
                 ],
             )
-                .await
-                .map_err(PostgresError::PgError)?;
-        }
+            .await
+            .map_err(PostgresError::PgError)?;
+
+        trans
+            .execute(
+                "
+                INSERT INTO relayer.transaction_audit_log(
+                    id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, speed,
+                    status, expires_at, queued_at, failed_at, failed_reason, external_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15);
+                ",
+                &[
+                    &transaction.id,
+                    &relayer_id,
+                    &transaction.to,
+                    &transaction.from,
+                    &transaction.nonce,
+                    &transaction.chain_id,
+                    &transaction.data,
+                    &transaction.value,
+                    &transaction.blobs,
+                    &transaction.speed,
+                    &failed_status,
+                    &transaction.expires_at,
+                    &transaction.queued_at,
+                    &truncated_reason,
+                    &transaction.external_id,
+                ],
+            )
+            .await
+            .map_err(PostgresError::PgError)?;
 
         trans.commit().await.map_err(PostgresError::PgError)?;
 
@@ -284,6 +348,169 @@ impl PostgresClient {
         trans.commit().await?;
 
         Ok(())
+    }
+
+    pub async fn repair_poisoned_pending_transactions_for_relayer(
+        &self,
+        relayer_id: &RelayerId,
+    ) -> Result<RepairedPoisonedPendingTransactions, PostgresError> {
+        let mut conn = self.pool.get().await?;
+        let trans = conn.transaction().await.map_err(PostgresError::PgError)?;
+
+        let row = trans
+            .query_one(
+                "
+                    WITH repaired AS (
+                        UPDATE relayer.transaction
+                        SET status = $2,
+                            failed_reason = COALESCE(failed_reason, $4)
+                        WHERE relayer_id = $1
+                          AND status = $3
+                          AND failed_at IS NOT NULL
+                          AND hash IS NULL
+                          AND sent_at IS NULL
+                        RETURNING *
+                    ),
+                    audit AS (
+                        INSERT INTO relayer.transaction_audit_log (
+                            id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, gas_limit,
+                            speed, status, expires_at, queued_at, sent_at, mined_at, confirmed_at,
+                            failed_at, failed_reason, hash, sent_max_priority_fee_per_gas,
+                            sent_max_fee_per_gas, gas_price, sent_with_gas, sent_with_blob_gas,
+                            block_hash, block_number, expired_at, external_id, cancelled_by_transaction_id
+                        )
+                        SELECT
+                            id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, gas_limit,
+                            speed, $2, expires_at, queued_at, sent_at, mined_at, confirmed_at,
+                            failed_at, failed_reason, hash, sent_max_priority_fee_per_gas,
+                            sent_max_fee_per_gas, gas_price, sent_with_gas, sent_with_blob_gas,
+                            block_hash, block_number, expired_at, external_id, cancelled_by_transaction_id
+                        FROM repaired
+                        RETURNING nonce
+                    )
+                    SELECT COUNT(*)::BIGINT AS repaired_count,
+                           MIN(nonce)::BIGINT AS min_nonce,
+                           MAX(nonce)::BIGINT AS max_nonce
+                    FROM audit;
+                ",
+                &[
+                    relayer_id,
+                    &TransactionStatus::FAILED,
+                    &TransactionStatus::PENDING,
+                    &"startup repair: terminalized unsent failed pending transaction",
+                ],
+            )
+            .await
+            .map_err(PostgresError::PgError)?;
+
+        trans.commit().await.map_err(PostgresError::PgError)?;
+
+        Ok(RepairedPoisonedPendingTransactions {
+            count: row.get("repaired_count"),
+            min_nonce: row.get::<_, Option<i64>>("min_nonce").map(TransactionNonce::from),
+            max_nonce: row.get::<_, Option<i64>>("max_nonce").map(TransactionNonce::from),
+        })
+    }
+
+    pub async fn repair_unbroadcast_future_nonce_pending_transactions_for_relayer(
+        &self,
+        relayer_id: &RelayerId,
+        chain_nonce: &TransactionNonce,
+        checked_absent_transactions: &[(TransactionId, TransactionHash)],
+        failed_reason: &str,
+    ) -> Result<RepairedUnbroadcastFutureNoncePendingTransactions, PostgresError> {
+        if checked_absent_transactions.is_empty() {
+            return Ok(RepairedUnbroadcastFutureNoncePendingTransactions {
+                count: 0,
+                min_nonce: None,
+                max_nonce: None,
+            });
+        }
+
+        let mut conn = self.pool.get().await?;
+        let trans = conn.transaction().await.map_err(PostgresError::PgError)?;
+
+        let mut count = 0;
+        let mut min_nonce: Option<TransactionNonce> = None;
+        let mut max_nonce: Option<TransactionNonce> = None;
+
+        for (transaction_id, transaction_hash) in checked_absent_transactions {
+            let row = trans
+                .query_one(
+                    "
+                        WITH repaired AS (
+                            UPDATE relayer.transaction
+                            SET status = $3,
+                                failed_at = NOW(),
+                                failed_reason = COALESCE(failed_reason, $5)
+                            WHERE id = $1
+                              AND relayer_id = $2
+                              AND status = $4
+                              AND sent_at IS NOT NULL
+                              AND failed_at IS NULL
+                              AND hash IS NOT NULL
+                              AND hash = $7
+                              AND nonce > $6
+                            RETURNING *
+                        ),
+                        audit AS (
+                            INSERT INTO relayer.transaction_audit_log (
+                                id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, gas_limit,
+                                speed, status, expires_at, queued_at, sent_at, mined_at, confirmed_at,
+                                failed_at, failed_reason, hash, sent_max_priority_fee_per_gas,
+                                sent_max_fee_per_gas, gas_price, sent_with_gas, sent_with_blob_gas,
+                                block_hash, block_number, expired_at, external_id, cancelled_by_transaction_id
+                            )
+                            SELECT
+                                id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, gas_limit,
+                                speed, $3, expires_at, queued_at, sent_at, mined_at, confirmed_at,
+                                failed_at, failed_reason, hash, sent_max_priority_fee_per_gas,
+                                sent_max_fee_per_gas, gas_price, sent_with_gas, sent_with_blob_gas,
+                                block_hash, block_number, expired_at, external_id, cancelled_by_transaction_id
+                            FROM repaired
+                            RETURNING nonce
+                        )
+                        SELECT COUNT(*)::BIGINT AS repaired_count,
+                               MIN(nonce)::BIGINT AS min_nonce,
+                               MAX(nonce)::BIGINT AS max_nonce
+                        FROM audit;
+                    ",
+                    &[
+                        transaction_id,
+                        relayer_id,
+                        &TransactionStatus::FAILED,
+                        &TransactionStatus::PENDING,
+                        &failed_reason,
+                        chain_nonce,
+                        transaction_hash,
+                    ],
+                )
+                .await
+                .map_err(PostgresError::PgError)?;
+
+            let repaired_count: i64 = row.get("repaired_count");
+            count += repaired_count;
+
+            if let Some(nonce) = row.get::<_, Option<i64>>("min_nonce").map(TransactionNonce::from)
+            {
+                min_nonce = Some(match min_nonce {
+                    Some(current) if current.into_inner() <= nonce.into_inner() => current,
+                    _ => nonce,
+                });
+            }
+
+            if let Some(nonce) = row.get::<_, Option<i64>>("max_nonce").map(TransactionNonce::from)
+            {
+                max_nonce = Some(match max_nonce {
+                    Some(current) if current.into_inner() >= nonce.into_inner() => current,
+                    _ => nonce,
+                });
+            }
+        }
+
+        trans.commit().await.map_err(PostgresError::PgError)?;
+
+        Ok(RepairedUnbroadcastFutureNoncePendingTransactions { count, min_nonce, max_nonce })
     }
 
     pub async fn transaction_mined(
