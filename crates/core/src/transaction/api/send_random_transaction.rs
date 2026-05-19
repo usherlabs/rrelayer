@@ -1,4 +1,5 @@
 use crate::app_state::AppState;
+use crate::middleware::policy::PolicyContext;
 use crate::network::ChainId;
 use crate::relayer::Relayer;
 use crate::shared::{bad_request, not_found, HttpError};
@@ -20,12 +21,13 @@ use std::sync::Arc;
 pub async fn send_transaction_random(
     State(state): State<Arc<AppState>>,
     Path(chain_id): Path<ChainId>,
+    policy_ctx: PolicyContext,
     headers: HeaderMap,
     Json(transaction): Json<RelayTransactionRequest>,
 ) -> Result<Json<SendTransactionResult>, HttpError> {
     state.validate_allowed_passed_basic_auth(&headers)?;
     let relayer = select_random_relayer(&state, &chain_id).await?;
-    let result = send_transaction(relayer, transaction, &state, &headers).await?;
+    let result = send_transaction(relayer, transaction, &state, &headers, &policy_ctx).await?;
     Ok(Json(result))
 }
 

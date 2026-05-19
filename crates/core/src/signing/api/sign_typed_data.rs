@@ -1,5 +1,6 @@
 use crate::app_state::NetworkValidateAction;
 use crate::common_types::EvmAddress;
+use crate::middleware::policy::PolicyContext;
 use crate::rate_limiting::RateLimiter;
 use crate::shared::{bad_request, forbidden, not_found, unauthorized, HttpError};
 use crate::signing::db::RecordSignedTypedDataRequest;
@@ -27,6 +28,7 @@ pub struct SignTypedDataResult {
 pub async fn sign_typed_data(
     State(state): State<Arc<AppState>>,
     Path(relayer_id): Path<RelayerId>,
+    policy_ctx: PolicyContext,
     headers: HeaderMap,
     Json(typed_data): Json<TypedData>,
 ) -> Result<Json<SignTypedDataResult>, HttpError> {
@@ -50,6 +52,13 @@ pub async fn sign_typed_data(
     if relayer_provider_context.relayer.paused {
         return Err(forbidden("Relayer is paused".to_string()));
     }
+
+    state.validate_request_policy(
+        &policy_ctx,
+        &headers,
+        &relayer_provider_context.relayer.address,
+        &relayer_provider_context.relayer.chain_id,
+    )?;
 
     if let Some(chain_id) = typed_data.domain.chain_id {
         let chain_id: u64 = chain_id.to();

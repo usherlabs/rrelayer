@@ -1,4 +1,5 @@
 use crate::common_types::EvmAddress;
+use crate::middleware::policy::PolicyContext;
 use crate::rate_limiting::RateLimiter;
 use crate::shared::{forbidden, not_found, HttpError};
 use crate::signing::db::RecordSignedTextRequest;
@@ -34,6 +35,7 @@ pub struct SignTextResult {
 pub async fn sign_text(
     State(state): State<Arc<AppState>>,
     Path(relayer_id): Path<RelayerId>,
+    policy_ctx: PolicyContext,
     headers: HeaderMap,
     Json(sign): Json<SignTextRequest>,
 ) -> Result<Json<SignTextResult>, HttpError> {
@@ -57,6 +59,13 @@ pub async fn sign_text(
     if relayer_provider_context.relayer.paused {
         return Err(forbidden("Relayer is paused".to_string()));
     }
+
+    state.validate_request_policy(
+        &policy_ctx,
+        &headers,
+        &relayer_provider_context.relayer.address,
+        &relayer_provider_context.relayer.chain_id,
+    )?;
 
     let rate_limit_reservation = RateLimiter::check_and_reserve_rate_limit(
         &state,

@@ -4,8 +4,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::common_types::EvmAddress;
+use crate::middleware::policy::PolicyContext;
 use crate::network::ChainId;
-use crate::shared::{unauthorized, HttpError};
+use crate::policy::{ip_allowed, verify_request_signature, SignatureVerificationError};
+use crate::shared::{forbidden, unauthorized, HttpError};
 use crate::transaction::types::TransactionValue;
 use crate::yaml::{ApiKey, NetworkPermissionsConfig, NetworkSetupConfig};
 use crate::{
@@ -282,6 +284,79 @@ impl AppState {
                     return Err(unauthorized(Some(
                         "Relayer have disabled personal signing".to_string(),
                     )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates IP allowlist and request-signature policy against the
+    /// configured `NetworkPermissionsConfig` entries that target `relayer` on
+    /// `chain_id`.
+    ///
+    /// Semantics:
+    /// * If a permission entry has `ip_allowlist: None`, IP is not restricted
+    ///   by that entry. If `Some(rules)`, the client IP must match at least
+    ///   one rule (otherwise the call is `403 Forbidden`).
+    /// * If a permission entry has `request_verification: Some(_)`, the
+    ///   request signature header MUST verify against the configured secret
+    ///   and canonical message; missing/invalid signatures yield `401`.
+    /// * A relayer is allowed when *every* matching permission entry passes
+    ///   its policy checks. (This mirrors how the other helpers iterate the
+    ///   permission list.)
+    pub fn validate_request_policy(
+        &self,
+        ctx: &PolicyContext,
+        headers: &axum::http::HeaderMap,
+        relayer: &EvmAddress,
+        chain_id: &ChainId,
+    ) -> Result<(), HttpError> {
+        let permissions = match self.find_network_permission(chain_id) {
+            Some(perms) => perms,
+            None => return Ok(()),
+        };
+
+        for permission in permissions {
+            if !permission.relayers.contains(relayer) {
+                continue;
+            }
+
+            if let Some(rules) = permission.ip_allowlist.as_ref() {
+                let client_ip = ctx.client_ip.ok_or_else(|| {
+                    forbidden(
+                        "ip allowlist is enforced but client ip could not be resolved"
+                            .to_string(),
+                    )
+                })?;
+
+                let allowed = ip_allowed(&client_ip, rules).map_err(|e| {
+                    crate::shared::internal_server_error(Some(format!(
+                        "ip allowlist misconfigured: {}",
+                        e
+                    )))
+                })?;
+
+                if !allowed {
+                    return Err(forbidden(format!(
+                        "client ip {} is not allowed by relayer policy",
+                        client_ip
+                    )));
+                }
+            }
+
+            if let Some(verification) = permission.request_verification.as_ref() {
+                match verify_request_signature(verification, headers) {
+                    Ok(()) => {}
+                    Err(SignatureVerificationError::SecretEnvMissing(name)) => {
+                        return Err(crate::shared::internal_server_error(Some(format!(
+                            "request_verification secret env `{}` is not set",
+                            name
+                        ))));
+                    }
+                    Err(err) => {
+                        return Err(unauthorized(Some(err.to_string())));
+                    }
                 }
             }
         }
