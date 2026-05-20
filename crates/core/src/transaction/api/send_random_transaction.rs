@@ -26,7 +26,8 @@ pub async fn send_transaction_random(
     Json(transaction): Json<RelayTransactionRequest>,
 ) -> Result<Json<SendTransactionResult>, HttpError> {
     state.validate_allowed_passed_basic_auth(&headers)?;
-    let relayer = select_random_relayer(&state, &chain_id).await?;
+    let relayer =
+        select_random_relayer_allowed_by_policy(&state, &chain_id, &policy_ctx, &headers).await?;
     let result = send_transaction(relayer, transaction, &state, &headers, &policy_ctx).await?;
     Ok(Json(result))
 }
@@ -36,9 +37,11 @@ pub async fn send_transaction_random(
 /// Filters out paused, internal-only, and relayers only allowed for random selection.
 /// Note: The random relayer feature must be explicitly enabled via `allowed_random_relayers`
 /// config for the network, otherwise all relayers will be filtered out.
-async fn select_random_relayer(
+async fn select_random_relayer_allowed_by_policy(
     state: &Arc<AppState>,
     chain_id: &ChainId,
+    policy_ctx: &PolicyContext,
+    headers: &HeaderMap,
 ) -> Result<Relayer, HttpError> {
     let relayers = state.db.get_all_relayers_for_chain(chain_id).await?;
 
@@ -56,9 +59,24 @@ async fn select_random_relayer(
                 && state.relayers_allowed_for_random.is_allowed(&r.address, &r.chain_id)
         })
         .collect();
-    available_relayers.choose(&mut rng).cloned().ok_or_else(|| {
-        bad_request(format!(
+
+    if available_relayers.is_empty() {
+        return Err(bad_request(format!(
             "No available relayers for chain {} (all relayers are paused, internal-only, or not allowed for random selection)",
+            chain_id
+        )));
+    }
+
+    let eligible_relayers: Vec<_> = available_relayers
+        .into_iter()
+        .filter(|r| {
+            state.validate_request_policy(policy_ctx, headers, &r.address, &r.chain_id).is_ok()
+        })
+        .collect();
+
+    eligible_relayers.choose(&mut rng).cloned().ok_or_else(|| {
+        bad_request(format!(
+            "No eligible relayers for chain {} passed request policy checks",
             chain_id
         ))
     })

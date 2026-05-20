@@ -1,5 +1,6 @@
 use alloy::primitives::utils::{parse_units, ParseUnits};
 use alloy::primitives::U256;
+use axum::http::HeaderName;
 use regex::{Captures, Regex};
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -428,6 +429,17 @@ impl JwtHs256Config {
     pub fn validate(&self) -> Result<(), String> {
         if self.secret_env.trim().is_empty() {
             return Err("request_verification.secret_env cannot be empty".to_string());
+        }
+        if let Some(signature_header) = self.signature_header.as_deref() {
+            if signature_header.trim().is_empty() {
+                return Err("request_verification.signature_header cannot be empty".to_string());
+            }
+            HeaderName::from_bytes(signature_header.as_bytes()).map_err(|_| {
+                format!(
+                    "request_verification.signature_header `{}` is not a valid HTTP header name",
+                    signature_header
+                )
+            })?;
         }
         Ok(())
     }
@@ -1105,4 +1117,33 @@ pub fn read(file_path: &PathBuf, raw_yaml: bool) -> Result<SetupConfig, ReadYaml
     }
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jwt_config(signature_header: Option<&str>) -> JwtHs256Config {
+        JwtHs256Config {
+            secret_env: "APPSMITH_SIGNATURE_KEY".to_string(),
+            signature_header: signature_header.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn jwt_hs256_allows_default_signature_header() {
+        assert!(jwt_config(None).validate().is_ok());
+    }
+
+    #[test]
+    fn jwt_hs256_rejects_empty_signature_header() {
+        let err = jwt_config(Some("   ")).validate().unwrap_err();
+        assert!(err.contains("signature_header cannot be empty"));
+    }
+
+    #[test]
+    fn jwt_hs256_rejects_invalid_signature_header() {
+        let err = jwt_config(Some("x appsmith signature")).validate().unwrap_err();
+        assert!(err.contains("not a valid HTTP header name"));
+    }
 }

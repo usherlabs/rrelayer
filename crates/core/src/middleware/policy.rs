@@ -1,10 +1,10 @@
 use std::net::IpAddr;
 
+use axum::async_trait;
 use axum::extract::{ConnectInfo, FromRequestParts, Request};
 use axum::http::{request::Parts, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::async_trait;
 
 /// Per-request context populated by `inject_policy_context` and consumed by
 /// per-handler policy validation in `AppState::validate_request_policy`.
@@ -22,14 +22,18 @@ impl PolicyContext {
     }
 }
 
-fn extract_client_ip(headers: &HeaderMap, connect_ip: Option<IpAddr>, trust_xff: bool) -> Option<IpAddr> {
+fn extract_client_ip(
+    headers: &HeaderMap,
+    connect_ip: Option<IpAddr>,
+    trust_xff: bool,
+) -> Option<IpAddr> {
     if trust_xff {
-        if let Some(raw) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = raw.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return Some(ip);
-                }
-            }
+        if let Some(raw) = headers.get("x-forwarded-for") {
+            return raw
+                .to_str()
+                .ok()
+                .and_then(|value| value.split(',').next())
+                .and_then(|first| first.trim().parse::<IpAddr>().ok());
         }
     }
 
@@ -48,13 +52,9 @@ pub async fn inject_policy_context(
 ) -> Result<Response, StatusCode> {
     let (mut parts, body) = req.into_parts();
 
-    let connect_ip = parts
-        .extensions
-        .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map(|info| info.0.ip());
+    let connect_ip =
+        parts.extensions.get::<ConnectInfo<std::net::SocketAddr>>().map(|info| info.0.ip());
     let client_ip = extract_client_ip(&parts.headers, connect_ip, trust_xff);
-
-
 
     let ctx = PolicyContext { client_ip };
     parts.extensions.insert(ctx);
@@ -71,11 +71,7 @@ where
     type Rejection = StatusCode;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<PolicyContext>()
-            .cloned()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        parts.extensions.get::<PolicyContext>().cloned().ok_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
@@ -87,10 +83,7 @@ mod tests {
     #[test]
     fn trust_xff_returns_first_entry() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.7, 10.0.0.1"),
-        );
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7, 10.0.0.1"));
         let connect = Some("10.0.0.1".parse().unwrap());
         let ip = extract_client_ip(&headers, connect, true).unwrap();
         assert_eq!(ip.to_string(), "203.0.113.7");
@@ -99,12 +92,26 @@ mod tests {
     #[test]
     fn no_trust_xff_falls_back_to_connect_info() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.7, 10.0.0.1"),
-        );
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7, 10.0.0.1"));
         let connect = Some("10.0.0.1".parse().unwrap());
         let ip = extract_client_ip(&headers, connect, false).unwrap();
+        assert_eq!(ip.to_string(), "10.0.0.1");
+    }
+
+    #[test]
+    fn trust_xff_with_malformed_header_returns_none() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        let connect = Some("10.0.0.1".parse().unwrap());
+        let ip = extract_client_ip(&headers, connect, true);
+        assert!(ip.is_none());
+    }
+
+    #[test]
+    fn trust_xff_without_header_falls_back_to_connect_info() {
+        let headers = HeaderMap::new();
+        let connect = Some("10.0.0.1".parse().unwrap());
+        let ip = extract_client_ip(&headers, connect, true).unwrap();
         assert_eq!(ip.to_string(), "10.0.0.1");
     }
 
