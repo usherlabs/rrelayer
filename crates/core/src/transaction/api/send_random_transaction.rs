@@ -67,17 +67,28 @@ async fn select_random_relayer_allowed_by_policy(
         )));
     }
 
+    let mut policy_error: Option<HttpError> = None;
     let eligible_relayers: Vec<_> = available_relayers
         .into_iter()
         .filter(|r| {
-            state.validate_request_policy(policy_ctx, headers, &r.address, &r.chain_id).is_ok()
+            match state.validate_request_policy(policy_ctx, headers, &r.address, &r.chain_id) {
+                Ok(()) => true,
+                Err(e) => {
+                    if policy_error.is_none() {
+                        policy_error = Some(e);
+                    }
+                    false
+                }
+            }
         })
         .collect();
 
     eligible_relayers.choose(&mut rng).cloned().ok_or_else(|| {
-        bad_request(format!(
-            "No eligible relayers for chain {} passed request policy checks",
-            chain_id
-        ))
+        policy_error.unwrap_or_else(|| {
+            bad_request(format!(
+                "No eligible relayers for chain {} passed request policy checks",
+                chain_id
+            ))
+        })
     })
 }
