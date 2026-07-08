@@ -305,12 +305,17 @@ impl TransactionsQueue {
                 tx.id, self.relayer.name
             );
         }
-        transactions.pop_front();
+        let released_nonce = transactions.pop_front().map(|tx| tx.nonce);
         info!(
             "Remaining pending transactions for relayer {}: {}",
             self.relayer.name,
             transactions.len()
         );
+        drop(transactions);
+
+        if let Some(nonce) = released_nonce {
+            self.nonce_manager.release_unbroadcast_nonce(nonce).await;
+        }
     }
 
     pub async fn remove_pending_transaction_by_id(
@@ -319,13 +324,17 @@ impl TransactionsQueue {
     ) -> bool {
         let mut transactions = self.pending_transactions.lock().await;
         if let Some(pos) = transactions.iter().position(|tx| tx.id == *transaction_id) {
-            transactions.remove(pos);
+            let released_nonce = transactions.remove(pos).map(|tx| tx.nonce);
             info!(
                 "Removed pending transaction {} from relayer {}: {} remaining",
                 transaction_id,
                 self.relayer.name,
                 transactions.len()
             );
+            drop(transactions);
+            if let Some(nonce) = released_nonce {
+                self.nonce_manager.release_unbroadcast_nonce(nonce).await;
+            }
             true
         } else {
             false
@@ -605,6 +614,9 @@ impl TransactionsQueue {
                 transactions.pop_front();
                 info!("Successfully moved transaction {} to mined status for relayer: {}. Inmempool: {}, Mined: {}",
                     id, self.relayer.name, transactions.len(), mining_transactions.len());
+                drop(mining_transactions);
+                drop(transactions);
+                self.nonce_manager.release_active_reservation(winner_transaction.nonce).await;
 
                 Ok(CompetitionResolutionResult {
                     winner: winner_transaction,

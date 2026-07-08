@@ -95,6 +95,11 @@ impl NonceManager {
             nonce_guard.nonce = nonce;
         }
     }
+
+    pub async fn release_active_reservation(&self, nonce: TransactionNonce) {
+        let mut nonce_guard = self.nonce.lock().await;
+        nonce_guard.active_reservations.remove(&nonce.into_inner());
+    }
 }
 
 #[cfg(test)]
@@ -157,5 +162,15 @@ mod tests {
         nonce_manager.set_reconciled_nonce(TransactionNonce::new(7)).await.unwrap();
 
         assert_eq!(nonce_manager.get_current_nonce().await, TransactionNonce::new(7));
+    }
+
+    #[tokio::test]
+    async fn release_active_reservation_does_not_rewind_head() {
+        let nonce_manager = NonceManager::new(TransactionNonce::new(7));
+        let reserved = nonce_manager.get_and_increment().await;
+
+        nonce_manager.release_active_reservation(reserved).await;
+
+        assert_eq!(nonce_manager.get_current_nonce().await, TransactionNonce::new(8));
     }
 }
