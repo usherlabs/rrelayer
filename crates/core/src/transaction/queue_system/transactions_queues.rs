@@ -82,12 +82,15 @@ fn classify_send_error_nonce_state(
         || error_msg.contains("nonce is too low")
         || error_msg.contains("invalid nonce")
         || error_msg.contains("nonce has already been used")
-        || error_msg.contains("already known")
     {
         return Some(SendErrorNonceClassification::ReusedOrKnown);
     }
 
     None
+}
+
+fn at_least_one_twenty_percent_bump(value: u128) -> u128 {
+    (value / u128::from(TWENTY_PERCENT_BUMP_DIVISOR.get())).max(1)
 }
 
 async fn proven_unbroadcast_future_nonce_pending_head(
@@ -656,9 +659,12 @@ impl TransactionsQueues {
 
                         // Bump original gas prices by 20% to ensure replacement
                         let bumped_max_fee = original_gas.max_fee
-                            + (original_gas.max_fee / TWENTY_PERCENT_BUMP_DIVISOR);
-                        let bumped_max_priority_fee =
-                            original_gas.max_priority_fee + (original_gas.max_priority_fee / 5);
+                            + at_least_one_twenty_percent_bump(original_gas.max_fee.into_u128());
+                        let bumped_max_priority_fee = original_gas.max_priority_fee
+                            + at_least_one_twenty_percent_bump(
+                                original_gas.max_priority_fee.into_u128(),
+                            )
+                            .into();
 
                         let gas_price = GasPriceResult {
                             max_fee: bumped_max_fee,
@@ -914,9 +920,12 @@ impl TransactionsQueues {
 
                         // Bump original gas prices by 20% to ensure replacement
                         let bumped_max_fee = original_gas.max_fee
-                            + (original_gas.max_fee / TWENTY_PERCENT_BUMP_DIVISOR);
-                        let bumped_max_priority_fee =
-                            original_gas.max_priority_fee + (original_gas.max_priority_fee / 5);
+                            + at_least_one_twenty_percent_bump(original_gas.max_fee.into_u128());
+                        let bumped_max_priority_fee = original_gas.max_priority_fee
+                            + at_least_one_twenty_percent_bump(
+                                original_gas.max_priority_fee.into_u128(),
+                            )
+                            .into();
 
                         let gas_price = GasPriceResult {
                             max_fee: bumped_max_fee,
@@ -1861,6 +1870,15 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::{HashMap, VecDeque};
 
+    #[test]
+    fn twenty_percent_bump_is_at_least_one() {
+        assert_eq!(at_least_one_twenty_percent_bump(0), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(1), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(5), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(6), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(10), 2);
+    }
+
     struct TestWalletManager;
 
     #[async_trait]
@@ -2238,5 +2256,14 @@ mod tests {
             transactions_queue.nonce_manager.get_current_nonce().await,
             crate::transaction::types::TransactionNonce::new(55)
         );
+    }
+
+    #[test]
+    fn classify_send_error_does_not_treat_already_known_as_nonce_mismatch() {
+        let send_error = SendTransactionError::RpcError(RpcError::Transport(
+            TransportErrorKind::Custom("already known".to_string().into()),
+        ));
+
+        assert_eq!(classify_send_error_nonce_state(&send_error), None);
     }
 }

@@ -43,6 +43,7 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 const FIVE_PERCENT_BUMP_DIVISOR: NonZeroU32 =
     NonZeroU32::new(20).expect("5% bump divisor is nonzero");
@@ -341,7 +342,13 @@ impl TransactionsQueue {
             effective_startup_nonce(chain_nonce, &pending_transactions, &inmempool_transactions)
         };
 
-        self.nonce_manager.set_reconciled_nonce(reconciled_nonce).await;
+        if let Err(error) = self.nonce_manager.set_reconciled_nonce(reconciled_nonce).await {
+            warn!(
+                "Rejected nonce reconcile for relayer {}: {}",
+                self.relayer.name, error
+            );
+            return self.nonce_manager.get_current_nonce().await;
+        }
         reconciled_nonce
     }
 

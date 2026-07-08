@@ -69,7 +69,7 @@ impl PostgresClient {
                     FROM relayer.transaction
                     WHERE relayer_id = $1
                     AND status = $2
-                    ORDER BY nonce ASC
+                    ORDER BY nonce ASC, id ASC
                     LIMIT $3
                     OFFSET $4;
                 ",
@@ -104,7 +104,7 @@ impl PostgresClient {
                         OR hash IS NOT NULL
                         OR sent_at IS NOT NULL
                     )
-                    ORDER BY nonce ASC
+                    ORDER BY nonce ASC, id ASC
                     LIMIT $3
                     OFFSET $4;
                 ",
@@ -137,7 +137,7 @@ impl PostgresClient {
                     AND failed_at IS NULL
                     AND hash IS NOT NULL
                     AND nonce > $3
-                    ORDER BY nonce ASC
+                    ORDER BY nonce ASC, id ASC
                     LIMIT $4
                     OFFSET $5;
                 ",

@@ -587,15 +587,17 @@ async fn pending_nonce_across_clients(
         }
     }
 
+    if let Some(nonce) = max_nonce {
+        return Ok(nonce);
+    }
+
     if let Some(error) = first_error {
         return Err(error);
     }
 
-    max_nonce.ok_or_else(|| {
-        RpcError::Transport(TransportErrorKind::Custom(
-            "no RPC providers configured".to_string().into(),
-        ))
-    })
+    Err(RpcError::Transport(TransportErrorKind::Custom(
+        "no RPC providers configured".to_string().into(),
+    )))
 }
 
 async fn transaction_exists_across_clients(
@@ -743,7 +745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_nonce_fails_closed_when_any_client_errors() {
+    async fn pending_nonce_returns_success_when_any_client_succeeds() {
         let first = Asserter::new();
         first.push_success(&"0x35");
         let second = Asserter::new();
@@ -752,7 +754,7 @@ mod tests {
 
         let nonce = pending_nonce_across_clients(&clients, &EvmAddress::zero()).await;
 
-        assert!(nonce.is_err());
+        assert_eq!(nonce.expect("successful nonce should win"), 53);
     }
 }
 
