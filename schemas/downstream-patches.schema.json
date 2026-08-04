@@ -54,11 +54,21 @@
     "absorbedBy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["downstream_removal_commit"],
+      "required": [
+        "downstream_disposition",
+        "downstream_removal_commit",
+        "canonical_only_regression_evidence",
+        "downstream_only_behavior_remaining"
+      ],
       "properties": {
+        "downstream_disposition": { "enum": ["removed", "disabled"] },
         "downstream_removal_commit": { "$ref": "#/$defs/gitOid" },
         "canonical_commit": { "$ref": "#/$defs/gitOid" },
-        "canonical_release": { "type": "string", "minLength": 1 }
+        "canonical_release": { "type": "string", "minLength": 1 },
+        "canonical_only_regression_evidence": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "downstream_only_behavior_remaining": { "const": false }
       },
       "anyOf": [
         {

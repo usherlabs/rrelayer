@@ -21,6 +21,7 @@ release_metadata=(
   "schemas/downstream-patches.schema.json"
   "scripts/report-canonical-sync.sh"
   "scripts/test-downstream-patch-coverage.sh"
+  "scripts/test-downstream-patches-schema.sh"
   "scripts/test-report-canonical-sync.sh"
   "scripts/test-verify-canonical-baseline.sh"
   "scripts/verify-canonical-baseline.sh"
