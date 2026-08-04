@@ -1,0 +1,62 @@
+name: Baseline v0.14 Raw E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/baseline-v0.14-actions
+
+permissions:
+  contents: read
+
+jobs:
+  e2e_raw:
+    name: Exact v0.14.0 raw-provider E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RAW_DANGEROUS_MNEMONIC: "enjoy jar sentence ghost buddy humble monster cannon fix ill eternal desert patrol tumble calm logic wrestle wall above grab debate noble absurd merry"
+      DATABASE_URL: "postgresql://postgres:rrelayer@localhost:5447/postgres"
+      POSTGRES_PASSWORD: "rrelayer"
+      RRELAYER_AUTH_USERNAME: "admin"
+      RRELAYER_AUTH_PASSWORD: "your_secure_password_here"
+      RRELAYER_WEBHOOK_SHARED_SECRET: "test-webhook-secret-123"
+      API_KEY_1: "test-api-key-1"
+      API_KEY_2: "test-api-key-2"
+      API_KEY_3: "test-api-key-3"
+      RRELAYER_MULTI_PROVIDER: "1"
+      RRELAYER_PROVIDERS: "raw"
+      FOUNDRY_DISABLE_NIGHTLY_WARNING: "true"
+      RUST_BACKTRACE: "1"
+      RUST_LOG: "error"
+    steps:
+      - name: Check out immutable canonical baseline
+        uses: actions/checkout@v4
+        with:
+          ref: v0.14.0
+
+      - name: Verify canonical baseline identity
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6"
+          test "$(git rev-parse HEAD^{tree})" = "765f71e0db280bde4eca36466483648358040d9b"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: baseline-v0.14-e2e-raw
+          cache-on-failure: true
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Foundry contract dependencies
+        working-directory: crates/e2e-tests/contracts
+        run: forge install foundry-rs/forge-std@v1.11.0 --no-git
+
+      - name: Run canonical raw-provider E2E suite
+        working-directory: crates/e2e-tests
+        run: cargo run --bin e2e-runner
+
+      - name: Clean up E2E services
+        if: always()
+        working-directory: crates/e2e-tests
+        run: docker compose down --volumes --remove-orphans
