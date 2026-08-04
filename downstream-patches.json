@@ -26,7 +26,8 @@
         "crates/core/src/relayer",
         "crates/core/src/provider",
         "crates/core/src/schema",
-        "crates/core/src/wallet"
+        "crates/core/src/wallet",
+        "crates/e2e-tests/src/tests/transactions/status"
       ],
       "affected_behaviors": [
         "persist signed hash and applicable gas before provider send",
@@ -98,9 +99,11 @@
         "README.md",
         "fixtures/request-policy-ip-rules.json",
         "crates/cli/src/commands/new.rs",
+        "crates/core/Cargo.toml",
         "crates/core/src/app_state.rs",
         "crates/core/src/lib.rs",
         "crates/core/src/yaml.rs",
+        "crates/core/src/startup.rs",
         "crates/core/src/middleware",
         "crates/core/src/policy",
         "crates/core/src/transaction/api",
