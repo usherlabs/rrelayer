@@ -379,16 +379,6 @@ fn format_transaction_hash(hash: Option<TransactionHash>) -> String {
     hash.map_or_else(|| "<pending>".to_string(), |hash| hash.to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::format_transaction_hash;
-
-    #[test]
-    fn accepted_submission_without_hash_is_printed_as_pending() {
-        assert_eq!(format_transaction_hash(None), "<pending>");
-    }
-}
-
 async fn handle_fund(
     relayer_id: &RelayerId,
     amount: &str,
@@ -633,4 +623,14 @@ fn log_transactions(transactions: Vec<Transaction>) -> Result<(), TransactionErr
 
 fn format_time(time: &DateTime<Utc>) -> String {
     time.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_transaction_hash;
+
+    #[test]
+    fn accepted_submission_without_hash_is_printed_as_pending() {
+        assert_eq!(format_transaction_hash(None), "<pending>");
+    }
 }

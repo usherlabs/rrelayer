@@ -31,7 +31,7 @@ use alloy::{
     eips::{BlockId, BlockNumberOrTag},
     network::Ethereum,
     network::TransactionBuilderError,
-    primitives::{keccak256, Bytes, Signature},
+    primitives::{Bytes, Signature},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::LocalSignerError,
@@ -451,8 +451,11 @@ impl EvmProvider {
             TypedTransaction::Eip7702(tx) => TxEnvelope::Eip7702(tx.into_signed(signature)),
         };
 
+        // For EIP-4844, the bytes sent over the wire include the blob sidecar,
+        // but the transaction identity is the hash of the signed inner
+        // transaction. Alloy caches that consensus hash on the envelope.
+        let hash = TransactionHash::from_alloy_hash(tx_envelope.hash());
         let bytes = Bytes::from(tx_envelope.encoded_2718());
-        let hash = TransactionHash::from_alloy_hash(&keccak256(&bytes));
 
         SignedTransaction { bytes, hash }
     }
@@ -685,7 +688,13 @@ mod tests {
     use super::*;
     use crate::relayer::RelayerId;
     use crate::wallet::WalletManagerChainId;
-    use alloy::{primitives::TxHash, providers::ProviderBuilder, transports::mock::Asserter};
+    use alloy::{
+        consensus::{TxEip4844, TxEip4844Variant, TxEip4844WithSidecar},
+        primitives::{keccak256, Address, TxHash, U256},
+        providers::ProviderBuilder,
+        transports::mock::Asserter,
+    };
+    use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant};
     use async_trait::async_trait;
     use chrono::Utc;
     use serde_json::json;
@@ -716,6 +725,43 @@ mod tests {
             "value": "0x0",
             "gasPrice": "0x1"
         })
+    }
+
+    #[test]
+    fn blob_transaction_hash_excludes_the_network_sidecar() {
+        let transaction = TypedTransaction::Eip4844(TxEip4844Variant::TxEip4844WithSidecar(
+            TxEip4844WithSidecar {
+                tx: TxEip4844 {
+                    chain_id: 1,
+                    nonce: 1,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_gas: 2,
+                    gas_limit: 100_000,
+                    to: Address::ZERO,
+                    value: U256::ZERO,
+                    access_list: Default::default(),
+                    blob_versioned_hashes: vec![TxHash::repeat_byte(1)],
+                    max_fee_per_blob_gas: 1,
+                    input: Bytes::new(),
+                },
+                sidecar: BlobTransactionSidecarVariant::Eip4844(BlobTransactionSidecar {
+                    blobs: vec![[2; 131_072].into()],
+                    commitments: vec![[3; 48].into()],
+                    proofs: vec![[4; 48].into()],
+                }),
+            },
+        ));
+        let signature = Signature::test_signature().with_parity(true);
+        let expected_envelope = TxEnvelope::Eip4844(match transaction.clone() {
+            TypedTransaction::Eip4844(tx) => tx.into_signed(signature),
+            _ => unreachable!(),
+        });
+        let network_payload_hash = keccak256(expected_envelope.encoded_2718());
+
+        let signed = EvmProvider::signed_transaction(transaction, signature);
+
+        assert_eq!(signed.hash(), TransactionHash::from_alloy_hash(expected_envelope.hash()));
+        assert_ne!(signed.hash(), TransactionHash::from_alloy_hash(&network_payload_hash));
     }
 
     #[tokio::test]
