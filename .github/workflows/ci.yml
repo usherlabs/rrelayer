@@ -5,7 +5,10 @@ on:
   push:
     branches:
       - 'release/**'
+      - 'fiet/v0.14'
       - 'master'
+    tags:
+      - 'fiet-v*'
   pull_request:
     branches:
       - 'master'
@@ -34,7 +37,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: rustup component add clippy
       - name: Run clippy
-        run: cargo clippy -- -D warnings -A clippy::uninlined_format_args
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::uninlined_format_args
+
+  downstream_integrity_policy:
+    name: Downstream Integrity and Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: downstream-integrity-policy
+          cache-on-failure: true
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libssl-dev pkg-config
+      - name: Run locked core regressions
+        run: cargo test -p rrelayer_core --lib --locked
+      - name: Check locked release CLI
+        run: cargo check -p rrelayer_cli --release --locked
+      - name: Build TypeScript SDK
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run build
 
   e2e_raw:
     name: E2E Raw Provider
@@ -79,7 +106,7 @@ jobs:
 
       - name: Run raw provider E2E tests
         working-directory: crates/e2e-tests
-        run: cargo run --bin e2e-runner
+        run: cargo run --locked --bin e2e-runner
 
       - name: Clean up E2E services
         if: always()
@@ -226,9 +253,9 @@ jobs:
           fi
 
           if [[ "${{ env.BUILD_TYPE }}" == "release" ]]; then
-            RUST_BACKTRACE=1 CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" cargo build --release --target "$target" "${flags[@]}" -vv
+            RUST_BACKTRACE=1 CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" cargo build --locked --release --target "$target" "${flags[@]}" -vv
           else
-            RUST_BACKTRACE=1 CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" cargo build --target "$target" "${flags[@]}" -vv
+            RUST_BACKTRACE=1 CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" cargo build --locked --target "$target" "${flags[@]}" -vv
           fi
 
       - name: Smoke Test
@@ -288,7 +315,7 @@ jobs:
           set -eo pipefail
           target="${{ matrix.target }}"
           
-          cargo test --exclude rust-sdk-playground --workspace --release --target "$target"
+          cargo test --exclude rust-sdk-playground --workspace --locked --release --target "$target"
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/heads/release/')
@@ -667,7 +694,7 @@ jobs:
             ls -l "$CMAKE_TOOLCHAIN_FILE" || echo "Toolchain file not found!"
           fi
 
-          RUST_BACKTRACE=1 CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" cargo build --release --target "$target" -vv
+          RUST_BACKTRACE=1 CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" cargo build --locked --release --target "$target" -vv
 
       - name: Smoke Test
         if: steps.check_release.outputs.is_release == 'true'

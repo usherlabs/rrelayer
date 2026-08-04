@@ -29,9 +29,9 @@ RUN if [ -f /tmp/docker-binary/rrelayer_cli ]; then \
     else \
         echo "Building from source"; \
         if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-            RUSTFLAGS='-C target-cpu=x86-64-v2' cargo build --release --features jemalloc --workspace --exclude rust-sdk-playground --exclude e2e-tests; \
+            RUSTFLAGS='-C target-cpu=x86-64-v2' cargo build --locked --release --features jemalloc --workspace --exclude rust-sdk-playground --exclude e2e-tests; \
         else \
-            RUSTFLAGS="-C target-cpu=neoverse-n1" cargo build --release --workspace --exclude rust-sdk-playground --exclude e2e-tests; \
+            RUSTFLAGS="-C target-cpu=neoverse-n1" cargo build --locked --release --workspace --exclude rust-sdk-playground --exclude e2e-tests; \
         fi; \
     fi
 

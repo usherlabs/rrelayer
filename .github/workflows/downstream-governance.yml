@@ -39,5 +39,8 @@ jobs:
           ($ids | length) == ($ids | unique | length)'
           downstream-patches.json
 
+      - name: Reject unledgered downstream source paths
+        run: bash scripts/test-downstream-patch-coverage.sh
+
       - name: Verify exact canonical baseline ancestry
         run: bash scripts/test-verify-canonical-baseline.sh
