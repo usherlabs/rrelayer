@@ -44,3 +44,6 @@ jobs:
 
       - name: Verify exact canonical baseline ancestry
         run: bash scripts/test-verify-canonical-baseline.sh
+
+      - name: Test non-mutating canonical comparison
+        run: bash scripts/test-report-canonical-sync.sh
