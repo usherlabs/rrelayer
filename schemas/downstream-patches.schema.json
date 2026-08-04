@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/usherlabs/rrelayer/blob/fiet/v0.14/schemas/downstream-patches.schema.json",
+  "title": "FIET downstream rrelayer patch ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "canonical", "patches"],
+  "properties": {
+    "$schema": {
+      "const": "./schemas/downstream-patches.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "canonical": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "commit", "tree"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "commit": { "$ref": "#/$defs/gitOid" },
+        "tree": { "$ref": "#/$defs/gitOid" }
+      }
+    },
+    "patches": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/patch" }
+    }
+  },
+  "$defs": {
+    "gitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "enum": ["planned", "submitted", "merged", "declined", "not_applicable"]
+        },
+        "url": { "type": "string", "minLength": 1 },
+        "commit": { "$ref": "#/$defs/gitOid" },
+        "release": { "type": "string", "minLength": 1 }
+      }
+    },
+    "absorbedBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["downstream_removal_commit"],
+      "properties": {
+        "downstream_removal_commit": { "$ref": "#/$defs/gitOid" },
+        "canonical_commit": { "$ref": "#/$defs/gitOid" },
+        "canonical_release": { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [
+        {
+          "properties": { "canonical_commit": true },
+          "required": ["canonical_commit"]
+        },
+        {
+          "properties": { "canonical_release": true },
+          "required": ["canonical_release"]
+        }
+      ]
+    },
+    "patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "owner",
+        "rationale",
+        "status",
+        "source_commits",
+        "affected_paths",
+        "affected_behaviors",
+        "canonical_baseline",
+        "requirement_ids",
+        "regression_tests",
+        "upstream"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["active", "absorbed"] },
+        "source_commits": { "$ref": "#/$defs/nonEmptyStringArray" },
+        "affected_paths": { "$ref": "#/$defs/nonEmptyStringArray" },
+        "affected_behaviors": { "$ref": "#/$defs/nonEmptyStringArray" },
+        "canonical_baseline": { "$ref": "#/$defs/gitOid" },
+        "requirement_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+        "regression_tests": { "$ref": "#/$defs/nonEmptyStringArray" },
+        "upstream": { "$ref": "#/$defs/upstream" },
+        "absorbed_by": { "$ref": "#/$defs/absorbedBy" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "absorbed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": { "absorbed_by": true },
+            "required": ["absorbed_by"]
+          },
+          "else": {
+            "not": {
+              "properties": { "absorbed_by": true },
+              "required": ["absorbed_by"]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

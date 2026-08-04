@@ -1,0 +1,155 @@
+{
+  "$schema": "./schemas/downstream-patches.schema.json",
+  "schema_version": 1,
+  "canonical": {
+    "repository": "https://github.com/joshstevens19/rrelayer.git",
+    "tag": "v0.14.0",
+    "commit": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+    "tree": "765f71e0db280bde4eca36466483648358040d9b"
+  },
+  "patches": [
+    {
+      "id": "transaction-integrity",
+      "title": "Durable broadcast evidence and nonce recovery",
+      "owner": "csmithington",
+      "rationale": "Preserve FIET transaction durability and recovery invariants while retaining canonical v0.14 nonce, cancellation, clone, expiry, and failure fixes.",
+      "status": "active",
+      "source_commits": [
+        "151c7747e82618a9396e07a712fc711ea74ca704",
+        "ccfdc754dd29061bd08efa2a99aa3201247fb408",
+        "4d97a7a5a7aa495ee56dc60c077436490e9b69bd",
+        "ccec4542dbbfae033edaf70b168da51e79c6252d",
+        "b7d38dfa27267f7cad39f3ae3ffc9ed248efdd4d"
+      ],
+      "affected_paths": [
+        "crates/core/src/transaction",
+        "crates/core/src/relayer",
+        "crates/core/src/schema"
+      ],
+      "affected_behaviors": [
+        "persist signed hash and applicable gas before provider send",
+        "recover ambiguous attempts from the live row and audit history",
+        "persist database repair before advancing in-memory nonce state",
+        "preserve stable live wallet-index namespaces"
+      ],
+      "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+      "requirement_ids": [
+        "rrelayer-transaction-integrity:nonce-reservations",
+        "rrelayer-transaction-integrity:broadcast-attempts",
+        "rrelayer-transaction-integrity:evidence-based-repair",
+        "rrelayer-transaction-integrity:durable-before-memory",
+        "rrelayer-transaction-integrity:wallet-index",
+        "rrelayer-transaction-integrity:replacement-cancellation"
+      ],
+      "regression_tests": [
+        "cargo test -p rrelayer_core --lib --locked transaction",
+        "cargo test -p rrelayer_core --lib --locked nonce",
+        "cargo test -p rrelayer_core --lib --locked recovery"
+      ],
+      "upstream": { "status": "planned" }
+    },
+    {
+      "id": "accepted-response",
+      "title": "Accepted transaction response with pending hash",
+      "owner": "csmithington",
+      "rationale": "Treat durable queue acceptance as HTTP success even when broadcast has not produced a transaction hash, while keeping the response explicit and pollable by ID.",
+      "status": "active",
+      "source_commits": [
+        "06d457b27819ce68e76d32e345e9238a5bae19fb"
+      ],
+      "affected_paths": [
+        "crates/core/src/transaction/api",
+        "crates/cli/src/commands/tx.rs",
+        "crates/sdk",
+        "sdk/typescript",
+        "documentation/rrelayer"
+      ],
+      "affected_behaviors": [
+        "return HTTP 200 with a present null hash after durable acceptance",
+        "represent a pending accepted hash in Rust and TypeScript SDKs",
+        "display pending accepted submissions in the CLI"
+      ],
+      "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+      "requirement_ids": [
+        "rrelayer-transaction-integrity:accepted-without-hash"
+      ],
+      "regression_tests": [
+        "cargo test -p rrelayer_core --lib --locked send_transaction",
+        "npm --prefix sdk/typescript run build"
+      ],
+      "upstream": { "status": "planned" }
+    },
+    {
+      "id": "request-policy",
+      "title": "Hardened mutation and signing request policy",
+      "owner": "csmithington",
+      "rationale": "Protect FIET Appsmith mutation and signing calls with validated source-IP and strict HS256 controls without extending policy to read or management routes.",
+      "status": "active",
+      "source_commits": [
+        "20193eb45864d9394f52f9f1559958c7c79101f0",
+        "c7813e89e7137240215b1cbcbefb238f7dcbc1cc",
+        "4acc662ca4cce4cce7f6c221e7bea099da41afa7",
+        "943dd5e51dcc8a0347cc709f2bf84739c4f825f2"
+      ],
+      "affected_paths": [
+        "crates/core/src/yaml.rs",
+        "crates/core/src/middleware",
+        "crates/core/src/policy",
+        "crates/core/src/transaction/api",
+        "crates/core/src/signing/api",
+        "documentation/rrelayer"
+      ],
+      "affected_behaviors": [
+        "validate tagged request policy and referenced secret before serving",
+        "resolve client IP fail closed with forwarding disabled by default",
+        "verify trimmed raw expiring HS256 JWTs with zero leeway",
+        "compose matching permissions with deterministic IP-before-JWT AND semantics",
+        "preserve ordered random-candidate policy errors"
+      ],
+      "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+      "requirement_ids": [
+        "rrelayer-request-policy:configuration",
+        "rrelayer-request-policy:composition",
+        "rrelayer-request-policy:startup-validation",
+        "rrelayer-request-policy:jwt-hs256",
+        "rrelayer-request-policy:client-ip",
+        "rrelayer-request-policy:route-scope",
+        "rrelayer-request-policy:random-selection"
+      ],
+      "regression_tests": [
+        "cargo test -p rrelayer_core --lib --locked policy",
+        "cargo test -p rrelayer_core --lib --locked request_policy"
+      ],
+      "upstream": { "status": "planned" }
+    },
+    {
+      "id": "reproducible-lock",
+      "title": "Tracked lockfile for reproducible FIET builds",
+      "owner": "csmithington",
+      "rationale": "FIET production and SGX builds use Cargo locked mode and must bind reviewed dependency resolution into the resulting image and enclave measurement.",
+      "status": "active",
+      "source_commits": [
+        "c73b500cc3a1f8f5b533d42ec6fc3ea037d42ff2"
+      ],
+      "affected_paths": [
+        "Cargo.lock",
+        ".github/workflows",
+        "Dockerfile"
+      ],
+      "affected_behaviors": [
+        "track Cargo.lock in downstream releases",
+        "build and test with locked dependency resolution"
+      ],
+      "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+      "requirement_ids": [
+        "rrelayer-source-governance:immutable-releases",
+        "rrelayer-vendor-provenance:reproducible-builds"
+      ],
+      "regression_tests": [
+        "cargo test -p rrelayer_core --lib --locked",
+        "cargo check -p rrelayer_cli --release --locked"
+      ],
+      "upstream": { "status": "not_applicable" }
+    }
+  ]
+}
