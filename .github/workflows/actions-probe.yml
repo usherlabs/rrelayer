@@ -1,0 +1,14 @@
+name: Actions probe
+
+on:
+  push:
+    branches:
+      - 'ci/actions-probe'
+
+jobs:
+  probe:
+    name: Runner startup probe
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm runner startup
+        run: echo 'GitHub Actions runner started successfully'
