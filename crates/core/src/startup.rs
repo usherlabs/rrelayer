@@ -3,6 +3,7 @@ use crate::authentication::{create_basic_auth_routes, inject_basic_auth_status};
 use crate::background_tasks::run_background_tasks;
 use crate::common_types::EvmAddress;
 use crate::gas::{BlobGasOracleCache, GasOracleCache};
+use crate::middleware::policy::inject_policy_context;
 use crate::network::{create_network_routes, ChainId};
 use crate::shared::HttpError;
 use crate::webhooks::WebhookManager;
@@ -254,10 +255,15 @@ async fn start_api(
         .nest("/transactions", create_transactions_routes())
         .nest("/signing", create_signing_routes());
 
+    let trust_xff = api_config.trust_forwarded_for;
+
     let app = Router::new()
         .route("/health", get(health_check))
         .merge(api_routes)
         .layer(middleware::from_fn(inject_basic_auth_status))
+        .layer(middleware::from_fn(move |req, next| {
+            inject_policy_context(trust_xff, req, next)
+        }))
         .layer(middleware::from_fn(activity_logger))
         .layer(cors)
         .with_state(app_state)
