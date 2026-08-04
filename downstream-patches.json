@@ -95,6 +95,11 @@
         "943dd5e51dcc8a0347cc709f2bf84739c4f825f2"
       ],
       "affected_paths": [
+        "README.md",
+        "fixtures/request-policy-ip-rules.json",
+        "crates/cli/src/commands/new.rs",
+        "crates/core/src/app_state.rs",
+        "crates/core/src/lib.rs",
         "crates/core/src/yaml.rs",
         "crates/core/src/middleware",
         "crates/core/src/policy",
@@ -106,8 +111,9 @@
         "validate tagged request policy and referenced secret before serving",
         "resolve client IP fail closed with forwarding disabled by default",
         "verify trimmed raw expiring HS256 JWTs with zero leeway",
+        "run basic or API-key authentication before request policy",
         "compose matching permissions with deterministic IP-before-JWT AND semantics",
-        "preserve ordered random-candidate policy errors"
+        "order random candidates by wallet index and relayer ID before preserving the first policy error"
       ],
       "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
       "requirement_ids": [
@@ -135,6 +141,7 @@
         "c73b500cc3a1f8f5b533d42ec6fc3ea037d42ff2"
       ],
       "affected_paths": [
+        ".gitignore",
         "Cargo.lock",
         ".github/workflows",
         "Dockerfile"
