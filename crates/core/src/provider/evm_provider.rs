@@ -334,6 +334,13 @@ impl EvmProvider {
         Ok(receipt)
     }
 
+    pub async fn transaction_exists(
+        &self,
+        transaction_hash: &TransactionHash,
+    ) -> Result<bool, RpcError<TransportErrorKind>> {
+        transaction_exists_across_clients(&self.rpc_clients, transaction_hash).await
+    }
+
     pub async fn get_nonce(
         &self,
         relayer: &Relayer,
@@ -346,10 +353,7 @@ impl EvmProvider {
                 WalletOrProviderError::InternalError(format!("Failed to get address: {}", e))
             })?;
 
-        let nonce = self
-            .rpc_client()
-            .get_transaction_count(address.into_address())
-            .block_id(BlockId::Number(BlockNumberOrTag::Pending))
+        let nonce = pending_nonce_across_clients(&self.rpc_clients, &address)
             .await
             .map_err(WalletOrProviderError::ProviderError)?;
 
@@ -360,11 +364,7 @@ impl EvmProvider {
         &self,
         address: &EvmAddress,
     ) -> Result<TransactionNonce, RpcError<TransportErrorKind>> {
-        let nonce = self
-            .rpc_client()
-            .get_transaction_count(address.into_address())
-            .block_id(BlockId::Number(BlockNumberOrTag::Pending))
-            .await?;
+        let nonce = pending_nonce_across_clients(&self.rpc_clients, address).await?;
 
         Ok(TransactionNonce::new(nonce))
     }
@@ -435,10 +435,7 @@ impl EvmProvider {
         transaction: &TypedTransaction,
         from: &EvmAddress,
     ) -> Result<GasLimit, RpcError<TransportErrorKind>> {
-        let mut request: TransactionRequest = transaction.clone().into();
-        // need from here else it will fail gas estimating
-        request.from = Some(from.into_address());
-
+        let request = transaction_request_for_gas_estimation(transaction, from);
         let request_with_other = WithOtherFields::new(request);
 
         let result = self.rpc_client().estimate_gas(request_with_other).await?;
@@ -506,5 +503,302 @@ impl EvmProvider {
 
     pub fn supports_blobs(&self) -> bool {
         self.wallet_manager.supports_blobs()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mocked(
+        asserter: alloy::transports::mock::Asserter,
+        wallet_manager: Arc<dyn WalletManagerTrait>,
+        gas_estimator: Arc<dyn BaseGasFeeEstimator + Send + Sync>,
+        chain_id: ChainId,
+    ) -> Self {
+        let provider =
+            ProviderBuilder::new().network::<AnyNetwork>().connect_mocked_client(asserter);
+        let provider: RelayerProvider = Box::new(provider);
+
+        EvmProvider {
+            rpc_clients: vec![Arc::new(provider)],
+            wallet_manager,
+            gas_estimator,
+            chain_id,
+            name: "mock".to_string(),
+            provider_urls: Vec::new(),
+            blocks_every: 250,
+            confirmations: 1,
+            can_clone: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mocked_with_clients(
+        asserters: Vec<alloy::transports::mock::Asserter>,
+        wallet_manager: Arc<dyn WalletManagerTrait>,
+        gas_estimator: Arc<dyn BaseGasFeeEstimator + Send + Sync>,
+        chain_id: ChainId,
+    ) -> Self {
+        let rpc_clients = asserters
+            .into_iter()
+            .map(|asserter| {
+                let provider =
+                    ProviderBuilder::new().network::<AnyNetwork>().connect_mocked_client(asserter);
+                Arc::new(Box::new(provider) as RelayerProvider)
+            })
+            .collect();
+
+        EvmProvider {
+            rpc_clients,
+            wallet_manager,
+            gas_estimator,
+            chain_id,
+            name: "mock".to_string(),
+            provider_urls: Vec::new(),
+            blocks_every: 250,
+            confirmations: 1,
+            can_clone: false,
+        }
+    }
+}
+
+async fn pending_nonce_across_clients(
+    rpc_clients: &[Arc<RelayerProvider>],
+    address: &EvmAddress,
+) -> Result<u64, RpcError<TransportErrorKind>> {
+    if rpc_clients.is_empty() {
+        return Err(RpcError::Transport(TransportErrorKind::Custom(
+            "no RPC providers configured".to_string().into(),
+        )));
+    }
+
+    let mut max_nonce: Option<u64> = None;
+    let mut first_error = None;
+
+    for rpc_client in rpc_clients {
+        match rpc_client
+            .get_transaction_count(address.into_address())
+            .block_id(BlockId::Number(BlockNumberOrTag::Pending))
+            .await
+        {
+            Ok(nonce) => max_nonce = Some(max_nonce.map_or(nonce, |max| max.max(nonce))),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(nonce) = max_nonce {
+        return Ok(nonce);
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    Err(RpcError::Transport(TransportErrorKind::Custom(
+        "no RPC providers configured".to_string().into(),
+    )))
+}
+
+async fn transaction_exists_across_clients(
+    rpc_clients: &[Arc<RelayerProvider>],
+    transaction_hash: &TransactionHash,
+) -> Result<bool, RpcError<TransportErrorKind>> {
+    if rpc_clients.is_empty() {
+        return Err(RpcError::Transport(TransportErrorKind::Custom(
+            "no RPC providers configured".to_string().into(),
+        )));
+    }
+
+    let mut first_error = None;
+
+    for rpc_client in rpc_clients {
+        match rpc_client.get_transaction_by_hash(transaction_hash.into_alloy_hash()).await {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::{primitives::TxHash, providers::ProviderBuilder, transports::mock::Asserter};
+    use serde_json::json;
+
+    fn mock_client(asserter: Asserter) -> Arc<RelayerProvider> {
+        let provider =
+            ProviderBuilder::new().network::<AnyNetwork>().connect_mocked_client(asserter);
+        Arc::new(Box::new(provider))
+    }
+
+    fn rpc_transaction(hash: TxHash) -> serde_json::Value {
+        json!({
+            "blockHash": null,
+            "blockNumber": null,
+            "hash": hash.to_string(),
+            "transactionIndex": null,
+            "type": "0x0",
+            "nonce": "0x0",
+            "input": "0x",
+            "r": "0x3b08715b4403c792b8c7567edea634088bedcd7f60d9352b1f16c69830f3afd5",
+            "s": "0x10b9afb67d2ec8b956f0e1dbc07eb79152904f3a7bf789fc869db56320adfe09",
+            "chainId": "0x1",
+            "v": "0x1c",
+            "gas": "0x5208",
+            "from": "0x32be343b94f860124dc4fee278fdcbd38c102d88",
+            "to": "0xdf190dc7190dfba737d7777a163445b7fff16133",
+            "value": "0x0",
+            "gasPrice": "0x1"
+        })
+    }
+
+    #[tokio::test]
+    async fn transaction_exists_returns_false_only_when_all_clients_miss() {
+        let hash = TxHash::repeat_byte(1);
+        let first = Asserter::new();
+        first.push_success(&serde_json::Value::Null);
+        let second = Asserter::new();
+        second.push_success(&serde_json::Value::Null);
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let exists = transaction_exists_across_clients(&clients, &TransactionHash::new(hash)).await;
+
+        assert_eq!(exists.expect("all clients reported missing"), false);
+    }
+
+    #[tokio::test]
+    async fn transaction_exists_returns_true_when_any_client_finds_hash() {
+        let hash = TxHash::repeat_byte(1);
+        let first = Asserter::new();
+        first.push_success(&serde_json::Value::Null);
+        let second = Asserter::new();
+        second.push_success(&rpc_transaction(hash));
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let exists = transaction_exists_across_clients(&clients, &TransactionHash::new(hash)).await;
+
+        assert_eq!(exists.expect("one client found transaction"), true);
+    }
+
+    #[tokio::test]
+    async fn transaction_exists_fails_closed_when_absence_has_provider_error() {
+        let hash = TxHash::repeat_byte(1);
+        let first = Asserter::new();
+        first.push_success(&serde_json::Value::Null);
+        let second = Asserter::new();
+        second.push_failure_msg("backend unavailable");
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let exists = transaction_exists_across_clients(&clients, &TransactionHash::new(hash)).await;
+
+        assert!(exists.is_err());
+    }
+
+    #[tokio::test]
+    async fn pending_nonce_returns_max_successful_nonce_when_clients_disagree() {
+        let first = Asserter::new();
+        first.push_success(&"0x7");
+        let second = Asserter::new();
+        second.push_success(&"0x35");
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let nonce = pending_nonce_across_clients(&clients, &EvmAddress::zero()).await;
+
+        assert_eq!(nonce.expect("nonce evidence is available"), 53);
+    }
+
+    #[tokio::test]
+    async fn pending_nonce_returns_shared_nonce_when_clients_agree() {
+        let first = Asserter::new();
+        first.push_success(&"0x35");
+        let second = Asserter::new();
+        second.push_success(&"0x35");
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let nonce = pending_nonce_across_clients(&clients, &EvmAddress::zero()).await;
+
+        assert_eq!(nonce.expect("nonce evidence is available"), 53);
+    }
+
+    #[tokio::test]
+    async fn pending_nonce_fails_closed_when_no_successful_response_is_usable() {
+        let first = Asserter::new();
+        first.push_failure_msg("backend unavailable");
+        let second = Asserter::new();
+        second.push_failure_msg("backend lagging");
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let nonce = pending_nonce_across_clients(&clients, &EvmAddress::zero()).await;
+
+        assert!(nonce.is_err());
+    }
+
+    #[tokio::test]
+    async fn pending_nonce_returns_success_when_any_client_succeeds() {
+        let first = Asserter::new();
+        first.push_success(&"0x35");
+        let second = Asserter::new();
+        second.push_failure_msg("backend unavailable");
+        let clients = vec![mock_client(first), mock_client(second)];
+
+        let nonce = pending_nonce_across_clients(&clients, &EvmAddress::zero()).await;
+
+        assert_eq!(nonce.expect("successful nonce should win"), 53);
+    }
+}
+
+fn transaction_request_for_gas_estimation(
+    transaction: &TypedTransaction,
+    from: &EvmAddress,
+) -> TransactionRequest {
+    let mut request: TransactionRequest = transaction.clone().into();
+    // Typed transactions require a gas limit for signing, but eth_estimateGas
+    // must not inherit that synthetic value or it becomes a simulation cap.
+    request.gas = None;
+    // need from here else it will fail gas estimating
+    request.from = Some(from.into_address());
+    request
+}
+
+#[cfg(test)]
+mod gas_estimation_tests {
+    use super::*;
+    use alloy::{
+        consensus::TxEip1559,
+        eips::eip2930::AccessList,
+        primitives::{Address, Bytes, TxKind, U256},
+    };
+
+    #[test]
+    fn gas_estimation_request_omits_typed_transaction_gas_limit() {
+        let from = EvmAddress::new(Address::repeat_byte(0x22));
+        let transaction = TypedTransaction::Eip1559(TxEip1559 {
+            to: TxKind::Call(Address::repeat_byte(0x11)),
+            value: U256::from(1),
+            input: Bytes::from_static(&[0x12, 0x34]),
+            gas_limit: 1_000_000,
+            nonce: 7,
+            max_priority_fee_per_gas: 1,
+            max_fee_per_gas: 2,
+            chain_id: 42161,
+            access_list: AccessList::default(),
+        });
+
+        let request = transaction_request_for_gas_estimation(&transaction, &from);
+
+        assert_eq!(request.from, Some(from.into_address()));
+        assert_eq!(request.gas, None);
+        assert_eq!(request.nonce, Some(7));
     }
 }

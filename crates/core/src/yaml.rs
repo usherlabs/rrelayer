@@ -1,5 +1,6 @@
 use alloy::primitives::utils::{parse_units, ParseUnits};
 use alloy::primitives::U256;
+use axum::http::HeaderName;
 use regex::{Captures, Regex};
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -372,6 +373,78 @@ impl SigningProvider {
     }
 }
 
+/// Supported request signature verification schemes.
+///
+/// Each variant owns the configuration its verification path needs — there is
+/// no top-level "verification config" struct, so adding a scheme means adding
+/// a variant (and a matching arm in
+/// `crate::policy::signature::verify_request_signature`).
+///
+/// On the wire this serializes as an *adjacently-tagged* enum: `scheme` picks
+/// the variant and `params` carries that variant's fields. Nesting the params
+/// avoids accidental field-name collisions between schemes and makes the
+/// policy file self-documenting.
+///
+/// ```yaml
+/// request_verification:
+///   scheme: jwt_hs256
+///   params:
+///     secret_env: APPSMITH_SIGNATURE_KEY
+///     signature_header: x-appsmith-signature
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "scheme", content = "params", rename_all = "snake_case")]
+pub enum SignatureScheme {
+    /// JWT signed with HS256 using a shared secret (Appsmith default).
+    JwtHs256(JwtHs256Config),
+}
+
+impl SignatureScheme {
+    /// Validate scheme-specific configuration before startup. Each new variant
+    /// should plug its own validation here.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            SignatureScheme::JwtHs256(cfg) => cfg.validate(),
+        }
+    }
+}
+
+/// Parameters required to verify a JWT signed with HS256.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JwtHs256Config {
+    /// Name of the environment variable containing the shared JWT signing
+    /// secret. The secret is read from process env at runtime (NOT embedded
+    /// in yaml).
+    pub secret_env: String,
+    /// Header that carries the JWT. Defaults to `x-appsmith-signature`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signature_header: Option<String>,
+}
+
+impl JwtHs256Config {
+    pub fn signature_header(&self) -> &str {
+        self.signature_header.as_deref().unwrap_or("x-appsmith-signature")
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.secret_env.trim().is_empty() {
+            return Err("request_verification.secret_env cannot be empty".to_string());
+        }
+        if let Some(signature_header) = self.signature_header.as_deref() {
+            if signature_header.trim().is_empty() {
+                return Err("request_verification.signature_header cannot be empty".to_string());
+            }
+            HeaderName::from_bytes(signature_header.as_bytes()).map_err(|_| {
+                format!(
+                    "request_verification.signature_header `{}` is not a valid HTTP header name",
+                    signature_header
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NetworkPermissionsConfig {
     pub relayers: AllOrOneOrManyAddresses,
@@ -385,6 +458,17 @@ pub struct NetworkPermissionsConfig {
     pub disable_typed_data_sign: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub disable_transactions: Option<bool>,
+    /// Optional list of client IP addresses or CIDR ranges allowed to call
+    /// endpoints scoped to this permission entry. If `None` (omitted), no IP
+    /// restriction is enforced. If `Some(vec![])`, no IPs are allowed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ip_allowlist: Option<Vec<String>>,
+    /// Optional signature-verification policy. When set, callers must include
+    /// a valid signature header and the rrelayer process must have the
+    /// configured secret in its environment. The shape of the inner config
+    /// is scheme-dependent (`scheme: jwt_hs256` + that scheme's fields).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub request_verification: Option<SignatureScheme>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -509,6 +593,11 @@ pub struct ApiConfig {
     pub allowed_origins: Option<Vec<String>>,
     pub authentication_username: String,
     pub authentication_password: String,
+    /// When `true`, the leftmost entry of the `x-forwarded-for` header is
+    /// used as the client IP for IP allowlist checks. Only enable when the
+    /// rrelayer is fronted by a trusted reverse proxy. Defaults to `false`.
+    #[serde(default)]
+    pub trust_forwarded_for: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -966,6 +1055,9 @@ pub enum ReadYamlError {
     #[error("Signing provider yaml bad format: {0}")]
     SigningProviderYamlError(String),
 
+    #[error("Request verification yaml bad format: {0}")]
+    RequestVerificationYamlError(String),
+
     #[error("Network {0} provider urls not defined")]
     NetworkProviderUrlsNotDefined(String),
 }
@@ -994,6 +1086,14 @@ pub fn read(file_path: &PathBuf, raw_yaml: bool) -> Result<SetupConfig, ReadYaml
         if let Some(signing_key) = &network.signing_provider {
             signing_key.validate().map_err(ReadYamlError::SigningProviderYamlError)?;
         }
+
+        if let Some(permissions) = &network.permissions {
+            for permission in permissions {
+                if let Some(rv) = &permission.request_verification {
+                    rv.validate().map_err(ReadYamlError::RequestVerificationYamlError)?;
+                }
+            }
+        }
     }
 
     if let Some(signing_key) = &config.signing_provider {
@@ -1017,4 +1117,33 @@ pub fn read(file_path: &PathBuf, raw_yaml: bool) -> Result<SetupConfig, ReadYaml
     }
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jwt_config(signature_header: Option<&str>) -> JwtHs256Config {
+        JwtHs256Config {
+            secret_env: "APPSMITH_SIGNATURE_KEY".to_string(),
+            signature_header: signature_header.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn jwt_hs256_allows_default_signature_header() {
+        assert!(jwt_config(None).validate().is_ok());
+    }
+
+    #[test]
+    fn jwt_hs256_rejects_empty_signature_header() {
+        let err = jwt_config(Some("   ")).validate().unwrap_err();
+        assert!(err.contains("signature_header cannot be empty"));
+    }
+
+    #[test]
+    fn jwt_hs256_rejects_invalid_signature_header() {
+        let err = jwt_config(Some("x appsmith signature")).validate().unwrap_err();
+        assert!(err.contains("not a valid HTTP header name"));
+    }
 }

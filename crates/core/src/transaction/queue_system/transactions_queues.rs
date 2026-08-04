@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    num::NonZeroU32,
     sync::Arc,
 };
 
@@ -12,6 +13,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+const TWENTY_PERCENT_BUMP_DIVISOR: NonZeroU32 =
+    NonZeroU32::new(5).expect("20% bump divisor is nonzero");
+
 /// Error types for transaction queues operations.
 #[derive(Error, Debug)]
 pub enum TransactionsQueuesError {
@@ -22,7 +26,10 @@ pub enum TransactionsQueuesError {
 }
 
 use super::{
-    start::spawn_processing_tasks_for_relayer,
+    start::{
+        effective_startup_nonce, future_nonce_pending_repair_hash,
+        spawn_processing_tasks_for_relayer,
+    },
     transactions_queue::TransactionsQueue,
     types::{
         AddTransactionError, CancelTransactionError, CancelTransactionResult, CompetitionType,
@@ -39,6 +46,7 @@ use crate::transaction::types::{TransactionBlob, TransactionConversionError, Tra
 use crate::{
     gas::{BlobGasOracleCache, BlobGasPriceResult, GasLimit, GasOracleCache, GasPriceResult},
     postgres::{PostgresClient, PostgresConnectionError},
+    provider::SendTransactionError,
     relayer::RelayerId,
     safe_proxy::SafeProxyManager,
     shared::{cache::Cache, common_types::WalletOrProviderError},
@@ -47,10 +55,63 @@ use crate::{
         cache::invalidate_transaction_no_state_cache,
         nonce_manager::NonceManager,
         queue_system::types::TransactionQueueSendTransactionError,
-        types::{Transaction, TransactionData, TransactionId, TransactionStatus, TransactionValue},
+        types::{
+            Transaction, TransactionData, TransactionId, TransactionNonce, TransactionStatus,
+            TransactionValue,
+        },
     },
     webhooks::WebhookManager,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendErrorNonceClassification {
+    TooHigh,
+    ReusedOrKnown,
+}
+
+fn classify_send_error_nonce_state(
+    error: &SendTransactionError,
+) -> Option<SendErrorNonceClassification> {
+    let error_msg = error.to_string().to_lowercase();
+
+    if error_msg.contains("nonce too high") || error_msg.contains("nonce is too high") {
+        return Some(SendErrorNonceClassification::TooHigh);
+    }
+
+    if error_msg.contains("nonce too low")
+        || error_msg.contains("nonce is too low")
+        || error_msg.contains("invalid nonce")
+        || error_msg.contains("nonce has already been used")
+    {
+        return Some(SendErrorNonceClassification::ReusedOrKnown);
+    }
+
+    None
+}
+
+fn at_least_one_twenty_percent_bump(value: u128) -> u128 {
+    (value / u128::from(TWENTY_PERCENT_BUMP_DIVISOR.get())).max(1)
+}
+
+async fn proven_unbroadcast_future_nonce_pending_head(
+    transactions_queue: &TransactionsQueue,
+    transaction: &Transaction,
+) -> Result<
+    Option<(TransactionNonce, crate::transaction::types::TransactionHash)>,
+    RpcError<TransportErrorKind>,
+> {
+    let chain_nonce = transactions_queue.get_nonce().await?;
+
+    let Some(hash) = future_nonce_pending_repair_hash(transaction, chain_nonce) else {
+        return Ok(None);
+    };
+
+    if transactions_queue.transaction_exists(&hash).await? {
+        return Ok(None);
+    }
+
+    Ok(Some((chain_nonce, hash)))
+}
 
 /// Container for managing multiple transaction queues across different relayers.
 ///
@@ -80,11 +141,21 @@ impl TransactionsQueues {
         let mut relayer_block_times_ms = HashMap::new();
 
         for setup in setups {
-            let current_nonce = setup.evm_provider.get_nonce(&setup.relayer).await?;
+            let onchain_nonce = setup.evm_provider.get_nonce(&setup.relayer).await?;
+            let current_nonce = effective_startup_nonce(
+                onchain_nonce,
+                &setup.pending_transactions,
+                &setup.inmempool_transactions,
+            );
 
             info!(
-                "Startup nonce synchronization for relayer {} ({}): synchronizing nonce manager with on-chain nonce {}",
-                setup.relayer.name, setup.relayer.id, current_nonce.into_inner()
+                "Startup nonce synchronization for relayer {} ({}): on-chain nonce {}, actionable pending {}, actionable inmempool {}, nonce manager starts at {}",
+                setup.relayer.name,
+                setup.relayer.id,
+                onchain_nonce.into_inner(),
+                setup.pending_transactions.len(),
+                setup.inmempool_transactions.len(),
+                current_nonce.into_inner()
             );
 
             relayer_block_times_ms.insert(setup.relayer.id, setup.evm_provider.blocks_every);
@@ -299,10 +370,6 @@ impl TransactionsQueues {
         gas_price: &GasPriceResult,
         blob_gas_price: Option<&BlobGasPriceResult>,
     ) -> Result<GasLimit, AddTransactionError> {
-        // Use a reasonable temporary limit for gas estimation
-        const TEMP_GAS_LIMIT: u128 = 1_000_000;
-        let temp_gas_limit = GasLimit::new(TEMP_GAS_LIMIT);
-
         let current_onchain_nonce = transactions_queue.get_nonce().await.map_err(|e| {
             AddTransactionError::CouldNotGetCurrentOnChainNonce(transaction.relayer_id, e)
         })?;
@@ -310,12 +377,14 @@ impl TransactionsQueues {
         let mut estimation_transaction = transaction.clone();
         estimation_transaction.nonce = current_onchain_nonce;
 
+        // EvmProvider removes this placeholder before eth_estimateGas; keep it
+        // tiny so it cannot be confused with an estimation cap.
         let temp_transaction_request = Self::create_typed_transaction(
             transactions_queue,
             &estimation_transaction,
             gas_price,
             blob_gas_price,
-            temp_gas_limit,
+            GasLimit::new(1),
         )?;
 
         let estimated_gas_limit = transactions_queue
@@ -400,6 +469,8 @@ impl TransactionsQueues {
             queued_at: Utc::now(),
             expires_at,
             sent_at: None,
+            failed_at: None,
+            failed_reason: None,
             mined_at: None,
             mined_at_block_number: None,
             confirmed_at: None,
@@ -431,12 +502,11 @@ impl TransactionsQueues {
         let estimated_gas_limit = match estimated_gas_limit {
             Ok(limit) => limit,
             Err(err) => {
+                transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
+
+                let failed_reason = err.to_string();
                 self.db
-                    .transaction_failed_on_send(
-                        relayer_id,
-                        &transaction,
-                        "Failed to send transaction as always failing on gas estimation",
-                    )
+                    .transaction_failed_on_send(relayer_id, &transaction, &failed_reason)
                     .await
                     .map_err(AddTransactionError::CouldNotSaveTransactionDb)?;
 
@@ -560,6 +630,8 @@ impl TransactionsQueues {
                             queued_at: Utc::now(),
                             expires_at,
                             sent_at: None,
+                            failed_at: None,
+                            failed_reason: None,
                             mined_at: None,
                             mined_at_block_number: None,
                             confirmed_at: None,
@@ -586,9 +658,13 @@ impl TransactionsQueues {
                             })?;
 
                         // Bump original gas prices by 20% to ensure replacement
-                        let bumped_max_fee = original_gas.max_fee + (original_gas.max_fee / 5);
-                        let bumped_max_priority_fee =
-                            original_gas.max_priority_fee + (original_gas.max_priority_fee / 5);
+                        let bumped_max_fee = original_gas.max_fee
+                            + at_least_one_twenty_percent_bump(original_gas.max_fee.into_u128());
+                        let bumped_max_priority_fee = original_gas.max_priority_fee
+                            + at_least_one_twenty_percent_bump(
+                                original_gas.max_priority_fee.into_u128(),
+                            )
+                            .into();
 
                         let gas_price = GasPriceResult {
                             max_fee: bumped_max_fee,
@@ -611,12 +687,8 @@ impl TransactionsQueues {
                             Err(TransactionQueueSendTransactionError::TransactionSendError(
                                 error,
                             )) => {
-                                let error_msg = error.to_string().to_lowercase();
-                                if error_msg.contains("nonce too low")
-                                    || error_msg.contains("nonce is too low")
-                                    || error_msg.contains("invalid nonce")
-                                    || error_msg.contains("nonce has already been used")
-                                    || error_msg.contains("already known")
+                                if classify_send_error_nonce_state(&error)
+                                    == Some(SendErrorNonceClassification::ReusedOrKnown)
                                 {
                                     warn!("cancel_transaction: nonce synchronization issue detected for relayer {}: {}", transaction.relayer_id, error);
 
@@ -806,6 +878,8 @@ impl TransactionsQueues {
                             queued_at: Utc::now(),
                             expires_at,
                             sent_at: None,
+                            failed_at: None,
+                            failed_reason: None,
                             mined_at: None,
                             mined_at_block_number: None,
                             confirmed_at: None,
@@ -845,9 +919,13 @@ impl TransactionsQueues {
                         replace_transaction.gas_limit = Some(bumped_gas_limit);
 
                         // Bump original gas prices by 20% to ensure replacement
-                        let bumped_max_fee = original_gas.max_fee + (original_gas.max_fee / 5);
-                        let bumped_max_priority_fee =
-                            original_gas.max_priority_fee + (original_gas.max_priority_fee / 5);
+                        let bumped_max_fee = original_gas.max_fee
+                            + at_least_one_twenty_percent_bump(original_gas.max_fee.into_u128());
+                        let bumped_max_priority_fee = original_gas.max_priority_fee
+                            + at_least_one_twenty_percent_bump(
+                                original_gas.max_priority_fee.into_u128(),
+                            )
+                            .into();
 
                         let gas_price = GasPriceResult {
                             max_fee: bumped_max_fee,
@@ -884,12 +962,8 @@ impl TransactionsQueues {
                             Err(TransactionQueueSendTransactionError::TransactionSendError(
                                 error,
                             )) => {
-                                let error_msg = error.to_string().to_lowercase();
-                                if error_msg.contains("nonce too low")
-                                    || error_msg.contains("nonce is too low")
-                                    || error_msg.contains("invalid nonce")
-                                    || error_msg.contains("nonce has already been used")
-                                    || error_msg.contains("already known")
+                                if classify_send_error_nonce_state(&error)
+                                    == Some(SendErrorNonceClassification::ReusedOrKnown)
                                 {
                                     warn!("replace_transaction: nonce synchronization issue detected for relayer {}: {}", transaction.relayer_id, error);
 
@@ -1020,6 +1094,73 @@ impl TransactionsQueues {
         );
 
         Ok(())
+    }
+
+    async fn reconcile_nonce_too_high_pending_head(
+        &mut self,
+        relayer_id: &RelayerId,
+        relayer_address: crate::shared::common_types::EvmAddress,
+        transactions_queue: &mut TransactionsQueue,
+        transaction: &Transaction,
+    ) -> Result<bool, ProcessPendingTransactionError> {
+        let Some((chain_nonce, hash)) = (match proven_unbroadcast_future_nonce_pending_head(
+            transactions_queue,
+            transaction,
+        )
+        .await
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                warn!(
+                    "process_single_pending: could not prove nonce-too-high pending head {} for relayer {} is unbroadcast: {}",
+                    transaction.id, relayer_id, error
+                );
+                return Ok(false);
+            }
+        }) else {
+            warn!(
+                "process_single_pending: nonce-too-high transaction {} for relayer {} is not a proven unbroadcast future-nonce pending head",
+                transaction.id, relayer_id
+            );
+            return Ok(false);
+        };
+
+        let repair_result = self
+            .db
+            .repair_unbroadcast_future_nonce_pending_transactions_for_relayer(
+                relayer_id,
+                &chain_nonce,
+                &[(transaction.id, hash)],
+                "runtime repair: terminalized unbroadcast future-nonce pending transaction",
+            )
+            .await
+            .map_err(|error| {
+                ProcessPendingTransactionError::DbError(*relayer_id, relayer_address, error)
+            })?;
+
+        if repair_result.count == 0 {
+            warn!(
+                "process_single_pending: nonce-too-high transaction {} for relayer {} was not terminalized because the database row no longer matched the proven future-nonce pending shape",
+                transaction.id, relayer_id
+            );
+            return Ok(false);
+        }
+
+        transactions_queue.remove_pending_transaction_by_id(&transaction.id).await;
+        let reconciled_nonce =
+            transactions_queue.reconcile_nonce_manager_to_actionable_queues(chain_nonce).await;
+        self.invalidate_transaction_cache(&transaction.id).await;
+
+        info!(
+            "process_single_pending: terminalized unbroadcast future-nonce pending transaction {} for relayer {} at row nonce {}, chain nonce {}, reconciled nonce manager to {}",
+            transaction.id,
+            relayer_id,
+            transaction.nonce.into_inner(),
+            chain_nonce.into_inner(),
+            reconciled_nonce.into_inner()
+        );
+
+        Ok(true)
     }
 
     pub async fn process_single_pending(
@@ -1154,12 +1295,34 @@ impl TransactionsQueues {
                                             error,
                                         ),
                                     ))
-                                } else if error_msg.contains("nonce too low")
-                                    || error_msg.contains("nonce is too low")
-                                    || error_msg.contains("invalid nonce")
-                                    || error_msg.contains("nonce has already been used")
-                                    || error_msg.contains("already known")
+                                } else if let Some(nonce_state) =
+                                    classify_send_error_nonce_state(&error)
                                 {
+                                    if nonce_state == SendErrorNonceClassification::TooHigh {
+                                        if self
+                                            .reconcile_nonce_too_high_pending_head(
+                                                relayer_id,
+                                                relayer_address,
+                                                &mut transactions_queue,
+                                                &transaction,
+                                            )
+                                            .await?
+                                        {
+                                            return Ok(
+                                                ProcessResult::<ProcessPendingStatus>::other(
+                                                    ProcessPendingStatus::NonceSynchronized,
+                                                    Some(&10),
+                                                ),
+                                            );
+                                        }
+
+                                        return Err(ProcessPendingTransactionError::SendTransactionError(
+                                            *relayer_id,
+                                            relayer_address,
+                                            TransactionQueueSendTransactionError::TransactionSendError(error),
+                                        ));
+                                    }
+
                                     warn!("process_single_pending: nonce synchronization issue detected for relayer {}: {}", relayer_id, error);
 
                                     if let Err(sync_error) = self
@@ -1459,12 +1622,8 @@ impl TransactionsQueues {
                                     {
                                         Ok(tx_sent) => tx_sent,
                                         Err(TransactionQueueSendTransactionError::TransactionSendError(error)) => {
-                                            let error_msg = error.to_string().to_lowercase();
-                                            if error_msg.contains("nonce too low")
-                                                || error_msg.contains("nonce is too low")
-                                                || error_msg.contains("invalid nonce")
-                                                || error_msg.contains("nonce has already been used")
-                                                || error_msg.contains("already known")
+                                            if classify_send_error_nonce_state(&error)
+                                                == Some(SendErrorNonceClassification::ReusedOrKnown)
                                             {
                                                 warn!("process_single_inmempool: nonce synchronization issue detected for relayer {} during gas bump: {}", relayer_id, error);
 
@@ -1688,5 +1847,423 @@ impl TransactionsQueues {
         } else {
             Err(ProcessMinedTransactionError::RelayerTransactionsQueueNotFound(*relayer_id))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        gas::{BaseGasFeeEstimator, GasEstimatorError, GasEstimatorResult, MaxFee, MaxPriorityFee},
+        network::ChainId,
+        provider::EvmProvider,
+        relayer::Relayer,
+        shared::common_types::EvmAddress,
+        wallet::{ImportKeyResult, WalletError, WalletManagerChainId, WalletManagerTrait},
+        yaml::GasBumpBlockConfig,
+    };
+    use alloy::{
+        dyn_abi::TypedData,
+        primitives::{Signature, TxHash},
+        transports::mock::Asserter,
+    };
+    use async_trait::async_trait;
+    use std::collections::{HashMap, VecDeque};
+
+    #[test]
+    fn twenty_percent_bump_is_at_least_one() {
+        assert_eq!(at_least_one_twenty_percent_bump(0), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(1), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(5), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(6), 1);
+        assert_eq!(at_least_one_twenty_percent_bump(10), 2);
+    }
+
+    struct TestWalletManager;
+
+    #[async_trait]
+    impl WalletManagerTrait for TestWalletManager {
+        async fn create_wallet(
+            &self,
+            _wallet_index: u32,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<EvmAddress, WalletError> {
+            Ok(EvmAddress::zero())
+        }
+
+        async fn get_address(
+            &self,
+            _wallet_index: u32,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<EvmAddress, WalletError> {
+            Ok(EvmAddress::zero())
+        }
+
+        async fn sign_transaction(
+            &self,
+            _wallet_index: u32,
+            _transaction: &TypedTransaction,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<Signature, WalletError> {
+            unreachable!("estimate failure test does not sign transactions")
+        }
+
+        async fn sign_text(
+            &self,
+            _wallet_index: u32,
+            _text: &str,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<Signature, WalletError> {
+            unreachable!("estimate failure test does not sign messages")
+        }
+
+        async fn sign_typed_data(
+            &self,
+            _wallet_index: u32,
+            _typed_data: &TypedData,
+            _chain_id: WalletManagerChainId,
+        ) -> Result<Signature, WalletError> {
+            unreachable!("estimate failure test does not sign typed data")
+        }
+
+        fn supports_blobs(&self) -> bool {
+            false
+        }
+
+        async fn import_existing_key(
+            &self,
+            _key_id: &str,
+            _wallet_index: u32,
+            _chain_id: &ChainId,
+            _expected_address: &EvmAddress,
+        ) -> Result<ImportKeyResult, WalletError> {
+            unreachable!("estimate failure test does not import keys")
+        }
+    }
+
+    struct TestGasEstimator;
+
+    #[async_trait]
+    impl BaseGasFeeEstimator for TestGasEstimator {
+        async fn get_gas_prices(
+            &self,
+            _chain_id: &ChainId,
+        ) -> Result<GasEstimatorResult, GasEstimatorError> {
+            unreachable!("estimate failure test passes gas prices directly")
+        }
+
+        fn is_chain_supported(&self, _chain_id: &ChainId) -> bool {
+            true
+        }
+    }
+
+    fn test_relayer(chain_id: ChainId) -> Relayer {
+        Relayer {
+            id: RelayerId::new(),
+            name: "test-relayer".to_string(),
+            chain_id,
+            cloned_from_chain_id: None,
+            address: EvmAddress::zero(),
+            wallet_index: 0,
+            max_gas_price: None,
+            paused: false,
+            eip_1559_enabled: true,
+            created_at: Utc::now(),
+            is_private_key: false,
+        }
+    }
+
+    fn pending_transaction(
+        relayer: &Relayer,
+        nonce: crate::transaction::types::TransactionNonce,
+    ) -> Transaction {
+        let now = Utc::now();
+        Transaction {
+            id: TransactionId::new(),
+            relayer_id: relayer.id,
+            to: EvmAddress::zero(),
+            from: relayer.address,
+            value: TransactionValue::zero(),
+            data: TransactionData::empty(),
+            nonce,
+            gas_limit: None,
+            status: TransactionStatus::PENDING,
+            blobs: None,
+            chain_id: relayer.chain_id,
+            known_transaction_hash: None,
+            queued_at: now,
+            expires_at: now,
+            sent_at: None,
+            failed_at: None,
+            failed_reason: None,
+            mined_at: None,
+            mined_at_block_number: None,
+            confirmed_at: None,
+            speed: TransactionSpeed::FAST,
+            sent_with_max_priority_fee_per_gas: None,
+            sent_with_max_fee_per_gas: None,
+            is_noop: false,
+            sent_with_gas: None,
+            sent_with_blob_gas: None,
+            external_id: Some("external-id".to_string()),
+            cancelled_by_transaction_id: None,
+        }
+    }
+
+    fn gas_price() -> GasPriceResult {
+        GasPriceResult {
+            max_priority_fee: MaxPriorityFee::new(1),
+            max_fee: MaxFee::new(1),
+            min_wait_time_estimate: None,
+            max_wait_time_estimate: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn add_transaction_estimate_failure_stays_unbroadcast_terminal_and_nonce_recoverable() {
+        let chain_id = ChainId::new(1);
+        let relayer = test_relayer(chain_id);
+        let asserter = Asserter::new();
+        asserter.push_success(&"0x7");
+        asserter.push_failure_msg("estimate rejected");
+
+        let evm_provider = EvmProvider::mocked(
+            asserter,
+            Arc::new(TestWalletManager),
+            Arc::new(TestGasEstimator),
+            chain_id,
+        );
+        let mut transactions_queue = TransactionsQueue::new(
+            TransactionsQueueSetup::new(
+                relayer.clone(),
+                evm_provider,
+                NonceManager::new(crate::transaction::types::TransactionNonce::new(7)),
+                VecDeque::new(),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::new(SafeProxyManager::new(Vec::new())),
+                GasBumpBlockConfig::default(),
+                1,
+            ),
+            Arc::new(Mutex::new(GasOracleCache::new())),
+            Arc::new(Mutex::new(BlobGasOracleCache::new())),
+        );
+
+        let assigned_nonce = transactions_queue.nonce_manager.get_and_increment().await;
+        let transaction = pending_transaction(&relayer, assigned_nonce);
+        let result = TransactionsQueues::estimate_and_validate_gas(
+            &mut transactions_queue,
+            &transaction,
+            &gas_price(),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(AddTransactionError::TransactionEstimateGasError(..))));
+        assert_eq!(transaction.failed_on_send_status(), TransactionStatus::FAILED);
+        assert!(transaction.known_transaction_hash.is_none());
+        assert!(transaction.sent_at.is_none());
+        assert_eq!(transactions_queue.get_pending_transaction_count().await, 0);
+
+        transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
+        assert_eq!(transactions_queue.nonce_manager.get_and_increment().await, assigned_nonce);
+    }
+
+    #[tokio::test]
+    async fn process_single_pending_reconciles_nonce_too_high_broadcast_absent_shape() {
+        let chain_id = ChainId::new(1);
+        let relayer = test_relayer(chain_id);
+        let asserter = Asserter::new();
+        asserter.push_success(&"0x7");
+        asserter.push_success(&serde_json::Value::Null);
+
+        let evm_provider = EvmProvider::mocked(
+            asserter,
+            Arc::new(TestWalletManager),
+            Arc::new(TestGasEstimator),
+            chain_id,
+        );
+        let transactions_queue = TransactionsQueue::new(
+            TransactionsQueueSetup::new(
+                relayer.clone(),
+                evm_provider,
+                NonceManager::new(crate::transaction::types::TransactionNonce::new(54)),
+                VecDeque::new(),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::new(SafeProxyManager::new(Vec::new())),
+                GasBumpBlockConfig::default(),
+                1,
+            ),
+            Arc::new(Mutex::new(GasOracleCache::new())),
+            Arc::new(Mutex::new(BlobGasOracleCache::new())),
+        );
+
+        let transaction_hash =
+            crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1));
+        let mut transaction =
+            pending_transaction(&relayer, crate::transaction::types::TransactionNonce::new(53));
+        transaction.known_transaction_hash = Some(transaction_hash);
+        transaction.sent_at = Some(Utc::now());
+
+        let send_error = SendTransactionError::RpcError(RpcError::Transport(
+            TransportErrorKind::Custom(
+                "nonce too high: address 0x0000000000000000000000000000000000000000, tx: 53 state: 7"
+                    .to_string()
+                    .into(),
+            ),
+        ));
+
+        assert_eq!(
+            classify_send_error_nonce_state(&send_error),
+            Some(SendErrorNonceClassification::TooHigh)
+        );
+
+        let candidate =
+            proven_unbroadcast_future_nonce_pending_head(&transactions_queue, &transaction)
+                .await
+                .expect("mocked provider proves transaction absence");
+
+        assert_eq!(
+            candidate,
+            Some((crate::transaction::types::TransactionNonce::new(7), transaction_hash))
+        );
+    }
+
+    #[tokio::test]
+    async fn process_single_pending_uses_max_rpc_nonce_for_future_nonce_repair_cutoff() {
+        let chain_id = ChainId::new(1);
+        let relayer = test_relayer(chain_id);
+        let lagging = Asserter::new();
+        lagging.push_success(&"0x7");
+        let healthy = Asserter::new();
+        healthy.push_success(&"0x35");
+
+        let evm_provider = EvmProvider::mocked_with_clients(
+            vec![lagging, healthy],
+            Arc::new(TestWalletManager),
+            Arc::new(TestGasEstimator),
+            chain_id,
+        );
+        let transactions_queue = TransactionsQueue::new(
+            TransactionsQueueSetup::new(
+                relayer.clone(),
+                evm_provider,
+                NonceManager::new(crate::transaction::types::TransactionNonce::new(54)),
+                VecDeque::new(),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::new(SafeProxyManager::new(Vec::new())),
+                GasBumpBlockConfig::default(),
+                1,
+            ),
+            Arc::new(Mutex::new(GasOracleCache::new())),
+            Arc::new(Mutex::new(BlobGasOracleCache::new())),
+        );
+
+        let mut transaction =
+            pending_transaction(&relayer, crate::transaction::types::TransactionNonce::new(53));
+        transaction.known_transaction_hash =
+            Some(crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1)));
+        transaction.sent_at = Some(Utc::now());
+
+        let candidate =
+            proven_unbroadcast_future_nonce_pending_head(&transactions_queue, &transaction)
+                .await
+                .expect("multi-RPC nonce evidence is available");
+
+        assert_eq!(candidate, None);
+    }
+
+    #[tokio::test]
+    async fn process_single_pending_does_not_repair_unsent_presend_hash() {
+        let chain_id = ChainId::new(1);
+        let relayer = test_relayer(chain_id);
+        let asserter = Asserter::new();
+        asserter.push_success(&"0x7");
+
+        let evm_provider = EvmProvider::mocked(
+            asserter,
+            Arc::new(TestWalletManager),
+            Arc::new(TestGasEstimator),
+            chain_id,
+        );
+        let transactions_queue = TransactionsQueue::new(
+            TransactionsQueueSetup::new(
+                relayer.clone(),
+                evm_provider,
+                NonceManager::new(crate::transaction::types::TransactionNonce::new(54)),
+                VecDeque::new(),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::new(SafeProxyManager::new(Vec::new())),
+                GasBumpBlockConfig::default(),
+                1,
+            ),
+            Arc::new(Mutex::new(GasOracleCache::new())),
+            Arc::new(Mutex::new(BlobGasOracleCache::new())),
+        );
+
+        let mut transaction =
+            pending_transaction(&relayer, crate::transaction::types::TransactionNonce::new(53));
+        transaction.known_transaction_hash =
+            Some(crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1)));
+
+        let candidate =
+            proven_unbroadcast_future_nonce_pending_head(&transactions_queue, &transaction)
+                .await
+                .expect("chain nonce read succeeds");
+
+        assert_eq!(candidate, None);
+    }
+
+    #[tokio::test]
+    async fn reconcile_nonce_keeps_remaining_future_pending_reserved() {
+        let chain_id = ChainId::new(1);
+        let relayer = test_relayer(chain_id);
+        let remaining_pending =
+            pending_transaction(&relayer, crate::transaction::types::TransactionNonce::new(54));
+        let evm_provider = EvmProvider::mocked(
+            Asserter::new(),
+            Arc::new(TestWalletManager),
+            Arc::new(TestGasEstimator),
+            chain_id,
+        );
+        let transactions_queue = TransactionsQueue::new(
+            TransactionsQueueSetup::new(
+                relayer,
+                evm_provider,
+                NonceManager::new(crate::transaction::types::TransactionNonce::new(55)),
+                VecDeque::from([remaining_pending]),
+                VecDeque::new(),
+                HashMap::new(),
+                Arc::new(SafeProxyManager::new(Vec::new())),
+                GasBumpBlockConfig::default(),
+                1,
+            ),
+            Arc::new(Mutex::new(GasOracleCache::new())),
+            Arc::new(Mutex::new(BlobGasOracleCache::new())),
+        );
+
+        let reconciled = transactions_queue
+            .reconcile_nonce_manager_to_actionable_queues(
+                crate::transaction::types::TransactionNonce::new(7),
+            )
+            .await;
+
+        assert_eq!(reconciled, crate::transaction::types::TransactionNonce::new(55));
+        assert_eq!(
+            transactions_queue.nonce_manager.get_current_nonce().await,
+            crate::transaction::types::TransactionNonce::new(55)
+        );
+    }
+
+    #[test]
+    fn classify_send_error_does_not_treat_already_known_as_nonce_mismatch() {
+        let send_error = SendTransactionError::RpcError(RpcError::Transport(
+            TransportErrorKind::Custom("already known".to_string().into()),
+        ));
+
+        assert_eq!(classify_send_error_nonce_state(&send_error), None);
     }
 }

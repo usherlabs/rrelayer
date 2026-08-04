@@ -6,7 +6,9 @@ pub use logger::setup_info_logger;
 mod shutdown;
 pub use shutdown::{enter_critical_operation, is_shutdown_in_progress, request_graceful_shutdown};
 mod middleware;
+pub use middleware::policy::PolicyContext;
 pub mod network;
+pub mod policy;
 mod postgres;
 pub use postgres::{PostgresClient, PostgresConnectionError};
 mod provider;
@@ -15,9 +17,9 @@ pub mod relayer;
 pub mod safe_proxy;
 pub use safe_proxy::{SafeProxyError, SafeProxyManager, SafeTransaction};
 pub use yaml::{
-    read, ApiConfig, AwsKmsSigningProviderConfig, GasProviders, NetworkSetupConfig,
+    read, ApiConfig, AwsKmsSigningProviderConfig, GasProviders, JwtHs256Config, NetworkSetupConfig,
     RateLimitConfig, RateLimitWithInterval, RawSigningProviderConfig, SafeProxyConfig, SetupConfig,
-    SigningProvider, UserRateLimitConfig,
+    SignatureScheme, SigningProvider, UserRateLimitConfig,
 };
 mod shared;
 pub use shared::{common_types, utils::get_chain_id};
@@ -34,7 +36,7 @@ pub use wallet::{generate_seed_phrase, AwsKmsWalletManager, WalletError};
 mod background_tasks;
 mod rate_limiting;
 pub use rate_limiting::RATE_LIMIT_HEADER_NAME;
-pub mod webhooks;
+mod webhooks;
 mod yaml;
 
 pub use docker::generate_docker_file;

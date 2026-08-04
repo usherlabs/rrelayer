@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     hash::{Hash, Hasher},
+    num::NonZeroU32,
     ops::{Add, Div, Mul},
     str,
     str::FromStr,
@@ -43,11 +44,11 @@ impl Mul<u32> for MaxFee {
     }
 }
 
-impl Div<u32> for MaxFee {
+impl Div<NonZeroU32> for MaxFee {
     type Output = MaxFee;
 
-    fn div(self, other: u32) -> Self::Output {
-        MaxFee(self.0 / other as u128)
+    fn div(self, other: NonZeroU32) -> Self::Output {
+        MaxFee(self.0 / u128::from(other.get()))
     }
 }
 
@@ -128,5 +129,18 @@ impl From<u128> for MaxFee {
 impl From<MaxFee> for u128 {
     fn from(max_fee: MaxFee) -> Self {
         max_fee.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroU32;
+
+    #[test]
+    fn divides_by_nonzero_divisor() {
+        let divisor = NonZeroU32::new(20).expect("test divisor is nonzero");
+
+        assert_eq!((MaxFee::new(100) / divisor).into_u128(), 5);
     }
 }

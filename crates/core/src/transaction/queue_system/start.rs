@@ -1,5 +1,6 @@
 use std::{collections::VecDeque, sync::Arc};
 
+use alloy::transports::{RpcError, TransportErrorKind};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -22,7 +23,7 @@ use crate::{
         utils::sleep_ms,
     },
     shutdown::subscribe_to_shutdown,
-    transaction::types::{Transaction, TransactionStatus},
+    transaction::types::{Transaction, TransactionNonce, TransactionStatus},
 };
 
 pub async fn spawn_processing_tasks_for_relayer(
@@ -218,7 +219,7 @@ async fn repopulate_transaction_queue(
     let mut paging_context = PagingContext::new(1000, 0);
     loop {
         let results = db
-            .get_transactions_by_status_for_relayer(relayer_id, status, &paging_context)
+            .get_actionable_transactions_by_status_for_relayer(relayer_id, status, &paging_context)
             .await
             .map_err(|e| {
                 RepopulateTransactionsQueueError::CouldNotGetTransactionsByStatusFromDatabase(
@@ -328,6 +329,161 @@ async fn repopulate_competitive_transaction_queue(
     );
 
     Ok(competitive_queue)
+}
+
+pub(super) fn effective_startup_nonce(
+    onchain_nonce: TransactionNonce,
+    pending_transactions: &VecDeque<Transaction>,
+    inmempool_transactions: &VecDeque<CompetitiveTransaction>,
+) -> TransactionNonce {
+    let pending_max =
+        pending_transactions.iter().map(|transaction| transaction.nonce.into_inner()).max();
+
+    let inmempool_max = inmempool_transactions
+        .iter()
+        .map(|transaction| {
+            let original_nonce = transaction.original.nonce.into_inner();
+            transaction
+                .competitive
+                .as_ref()
+                .map(|(competitor, _)| original_nonce.max(competitor.nonce.into_inner()))
+                .unwrap_or(original_nonce)
+        })
+        .max();
+
+    let next_after_actionable = pending_max
+        .into_iter()
+        .chain(inmempool_max)
+        .max()
+        .map(|nonce| nonce.saturating_add(1))
+        .unwrap_or(0);
+
+    TransactionNonce::new(onchain_nonce.into_inner().max(next_after_actionable))
+}
+
+pub(super) fn future_nonce_pending_repair_hash(
+    transaction: &Transaction,
+    chain_nonce: TransactionNonce,
+) -> Option<crate::transaction::types::TransactionHash> {
+    if transaction.status == TransactionStatus::PENDING
+        && transaction.sent_at.is_some()
+        && transaction.nonce.into_inner() > chain_nonce.into_inner()
+    {
+        transaction.known_transaction_hash
+    } else {
+        None
+    }
+}
+
+#[derive(Error, Debug)]
+enum RepairUnbroadcastFutureNoncePendingTransactionsError {
+    #[error("failed to get chain nonce for relayer {0}: {1}")]
+    CouldNotGetChainNonce(RelayerId, WalletOrProviderError),
+
+    #[error("failed to load candidate transactions for relayer {0}: {1}")]
+    CouldNotLoadCandidates(RelayerId, PostgresError),
+
+    #[error("failed to check provider transaction hash {1} for relayer {0}: {2}")]
+    CouldNotCheckTransactionHash(
+        RelayerId,
+        crate::transaction::types::TransactionHash,
+        RpcError<TransportErrorKind>,
+    ),
+
+    #[error(
+        "failed to terminalize unbroadcast future-nonce pending transactions for relayer {0}: {1}"
+    )]
+    CouldNotRepairCandidates(RelayerId, PostgresError),
+}
+
+async fn repair_unbroadcast_future_nonce_pending_transactions_for_relayer(
+    db: &PostgresClient,
+    relayer: &Relayer,
+    provider: &EvmProvider,
+) -> Result<(), RepairUnbroadcastFutureNoncePendingTransactionsError> {
+    let chain_nonce = provider.get_nonce(relayer).await.map_err(|error| {
+        RepairUnbroadcastFutureNoncePendingTransactionsError::CouldNotGetChainNonce(
+            relayer.id, error,
+        )
+    })?;
+
+    let mut candidates = Vec::new();
+    let mut paging_context = PagingContext::new(1000, 0);
+    loop {
+        let results = db
+            .get_unbroadcast_future_nonce_pending_transactions_for_relayer(
+                &relayer.id,
+                &chain_nonce,
+                &paging_context,
+            )
+            .await
+            .map_err(|error| {
+                RepairUnbroadcastFutureNoncePendingTransactionsError::CouldNotLoadCandidates(
+                    relayer.id, error,
+                )
+            })?;
+
+        let result_count = results.items.len();
+        candidates.extend(results.items);
+
+        let next = paging_context.next(result_count);
+        match next {
+            Some(next) => paging_context = next,
+            None => break,
+        }
+    }
+
+    let mut repair_ids = Vec::new();
+    for transaction in candidates {
+        let Some(hash) = future_nonce_pending_repair_hash(&transaction, chain_nonce) else {
+            continue;
+        };
+
+        let exists = provider.transaction_exists(&hash).await.map_err(|error| {
+            RepairUnbroadcastFutureNoncePendingTransactionsError::CouldNotCheckTransactionHash(
+                relayer.id, hash, error,
+            )
+        })?;
+
+        if !exists {
+            repair_ids.push((transaction.id, hash));
+        }
+    }
+
+    let repair_result = db
+        .repair_unbroadcast_future_nonce_pending_transactions_for_relayer(
+            &relayer.id,
+            &chain_nonce,
+            &repair_ids,
+            "startup repair: terminalized unbroadcast future-nonce pending transaction",
+        )
+        .await
+        .map_err(|error| {
+            RepairUnbroadcastFutureNoncePendingTransactionsError::CouldNotRepairCandidates(
+                relayer.id, error,
+            )
+        })?;
+
+    if repair_result.count > 0 {
+        info!(
+            "Startup repaired unbroadcast future-nonce pending transactions for relayer {} ({}): chain nonce {}, count {}, nonce range {:?}..={:?}; repaired rows are FAILED and excluded from actionable startup queues",
+            relayer.name,
+            relayer.id,
+            chain_nonce.into_inner(),
+            repair_result.count,
+            repair_result.min_nonce.map(|nonce| nonce.into_inner()),
+            repair_result.max_nonce.map(|nonce| nonce.into_inner())
+        );
+    } else {
+        info!(
+            "Startup found no unbroadcast future-nonce pending transactions for relayer {} ({}) at chain nonce {}",
+            relayer.name,
+            relayer.id,
+            chain_nonce.into_inner()
+        );
+    }
+
+    Ok(())
 }
 
 /// Loads all relayers from the database.
@@ -476,6 +632,9 @@ pub enum StartTransactionsQueuesError {
 
     #[error("Failed to import private keys as relayers: {0}")]
     PrivateKeyImportError(#[from] crate::relayer::CreateRelayerError),
+
+    #[error("Failed to repair poisoned pending transactions for relayer {0}: {1}")]
+    CouldNotRepairPoisonedPendingTransactions(RelayerId, PostgresError),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -522,9 +681,66 @@ pub async fn startup_transactions_queues(
 
                 let relayer_id = relayer.id;
 
+                let repair_result = postgres
+                    .repair_poisoned_pending_transactions_for_relayer(&relayer_id)
+                    .await
+                    .map_err(|error| {
+                        StartTransactionsQueuesError::CouldNotRepairPoisonedPendingTransactions(
+                            relayer_id, error,
+                        )
+                    })?;
+
+                if repair_result.count > 0 {
+                    info!(
+                        "Startup repaired poisoned unsent pending transactions for relayer {} ({}): count {}, nonce range {:?}..={:?}; repaired rows are FAILED and excluded from actionable startup queues",
+                        relayer.name,
+                        relayer_id,
+                        repair_result.count,
+                        repair_result.min_nonce.map(|nonce| nonce.into_inner()),
+                        repair_result.max_nonce.map(|nonce| nonce.into_inner())
+                    );
+                } else {
+                    info!(
+                        "Startup found no poisoned unsent pending transactions for relayer {} ({})",
+                        relayer.name, relayer_id
+                    );
+                }
+
+                if let Err(error) =
+                    repair_unbroadcast_future_nonce_pending_transactions_for_relayer(
+                        &postgres,
+                        &relayer,
+                        &evm_provider,
+                    )
+                    .await
+                {
+                    error!(
+                        "Startup could not prove and repair unbroadcast future-nonce pending transactions for relayer {} ({}); leaving matching rows actionable: {}",
+                        relayer.name, relayer_id, error
+                    );
+                }
+
+                let pending_transactions = repopulate_transaction_queue(
+                    &postgres,
+                    &relayer_id,
+                    &TransactionStatus::PENDING,
+                )
+                .await?;
+                let inmempool_transactions =
+                    repopulate_competitive_transaction_queue(&postgres, &relayer_id).await?;
                 let mined_transactions =
                     repopulate_transaction_queue(&postgres, &relayer_id, &TransactionStatus::MINED)
                         .await?;
+
+                info!(
+                    "Startup actionable queues for relayer {} ({}): pending {}, inmempool {}, mined {}; repaired poisoned unsent failures {}",
+                    relayer.name,
+                    relayer_id,
+                    pending_transactions.len(),
+                    inmempool_transactions.len(),
+                    mined_transactions.len(),
+                    repair_result.count
+                );
 
                 let network_config =
                     network_configs.iter().find(|config| config.chain_id == relayer.chain_id);
@@ -539,13 +755,8 @@ pub async fn startup_transactions_queues(
                 transaction_relayer_setups.push(TransactionRelayerSetup::new(
                     relayer,
                     evm_provider,
-                    repopulate_transaction_queue(
-                        &postgres,
-                        &relayer_id,
-                        &TransactionStatus::PENDING,
-                    )
-                    .await?,
-                    repopulate_competitive_transaction_queue(&postgres, &relayer_id).await?,
+                    pending_transactions,
+                    inmempool_transactions,
                     mined_transactions
                         .into_iter()
                         .map(|transaction| (transaction.id, transaction))
@@ -572,4 +783,133 @@ pub async fn startup_transactions_queues(
     spawn_processing_tasks(transactions_queues.clone()).await;
 
     Ok(transactions_queues)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common_types::EvmAddress,
+        network::ChainId,
+        transaction::types::{TransactionData, TransactionId, TransactionSpeed, TransactionValue},
+    };
+    use alloy::primitives::TxHash;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn transaction(status: TransactionStatus, nonce: u64) -> Transaction {
+        let now = Utc::now();
+        Transaction {
+            id: TransactionId::new(),
+            relayer_id: RelayerId::new(),
+            to: EvmAddress::zero(),
+            from: EvmAddress::zero(),
+            value: TransactionValue::zero(),
+            data: TransactionData::empty(),
+            nonce: TransactionNonce::new(nonce),
+            gas_limit: None,
+            status,
+            blobs: None,
+            chain_id: ChainId::new(1),
+            known_transaction_hash: None,
+            queued_at: now,
+            expires_at: now,
+            sent_at: None,
+            failed_at: None,
+            failed_reason: None,
+            mined_at: None,
+            mined_at_block_number: None,
+            confirmed_at: None,
+            speed: TransactionSpeed::FAST,
+            sent_with_max_priority_fee_per_gas: None,
+            sent_with_max_fee_per_gas: None,
+            is_noop: false,
+            sent_with_gas: None,
+            sent_with_blob_gas: None,
+            external_id: None,
+            cancelled_by_transaction_id: None,
+        }
+    }
+
+    #[test]
+    fn startup_repair_effective_startup_nonce_ignores_repaired_unsent_failures() {
+        let confirmed_transactions: HashMap<_, _> = (0..7)
+            .map(|nonce| (TransactionId::new(), transaction(TransactionStatus::CONFIRMED, nonce)))
+            .collect();
+        let repaired_poisoned_nonces: Vec<_> = (7..=52).collect();
+
+        let effective_nonce =
+            effective_startup_nonce(TransactionNonce::new(7), &VecDeque::new(), &VecDeque::new());
+
+        assert_eq!(confirmed_transactions.len(), 7);
+        assert_eq!(repaired_poisoned_nonces.len(), 46);
+        assert_eq!(effective_nonce, TransactionNonce::new(7));
+    }
+
+    #[test]
+    fn startup_repair_rejects_unsent_future_nonce_pending_presend_hash() {
+        let mut pending = transaction(TransactionStatus::PENDING, 52);
+        pending.known_transaction_hash =
+            Some(crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1)));
+
+        let repair_hash = future_nonce_pending_repair_hash(&pending, TransactionNonce::new(7));
+
+        assert_eq!(repair_hash, None);
+    }
+
+    #[test]
+    fn startup_repair_selects_future_nonce_pending_hash_with_broadcast_evidence() {
+        let mut pending = transaction(TransactionStatus::PENDING, 52);
+        pending.known_transaction_hash =
+            Some(crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1)));
+        pending.sent_at = Some(Utc::now());
+
+        let repair_hash = future_nonce_pending_repair_hash(&pending, TransactionNonce::new(7));
+
+        assert_eq!(repair_hash, pending.known_transaction_hash);
+    }
+
+    #[test]
+    fn startup_repair_preserves_hash_present_pending_at_chain_nonce() {
+        let mut pending = transaction(TransactionStatus::PENDING, 7);
+        pending.known_transaction_hash =
+            Some(crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1)));
+
+        let repair_hash = future_nonce_pending_repair_hash(&pending, TransactionNonce::new(7));
+
+        assert_eq!(repair_hash, None);
+    }
+
+    #[test]
+    fn startup_repair_preserves_inmempool_future_nonce_hash() {
+        let mut inmempool = transaction(TransactionStatus::INMEMPOOL, 52);
+        inmempool.known_transaction_hash =
+            Some(crate::transaction::types::TransactionHash::new(TxHash::repeat_byte(1)));
+
+        let repair_hash = future_nonce_pending_repair_hash(&inmempool, TransactionNonce::new(7));
+
+        assert_eq!(repair_hash, None);
+    }
+
+    #[test]
+    fn effective_startup_nonce_accounts_for_valid_actionable_broadcast_above_chain_nonce() {
+        let mut inmempool = VecDeque::new();
+        inmempool
+            .push_back(CompetitiveTransaction::new(transaction(TransactionStatus::INMEMPOOL, 10)));
+
+        let effective_nonce =
+            effective_startup_nonce(TransactionNonce::new(7), &VecDeque::new(), &inmempool);
+
+        assert_eq!(effective_nonce, TransactionNonce::new(11));
+    }
+
+    #[test]
+    fn effective_startup_nonce_accounts_for_valid_actionable_pending_above_chain_nonce() {
+        let pending = VecDeque::from([transaction(TransactionStatus::PENDING, 9)]);
+
+        let effective_nonce =
+            effective_startup_nonce(TransactionNonce::new(7), &pending, &VecDeque::new());
+
+        assert_eq!(effective_nonce, TransactionNonce::new(10));
+    }
 }

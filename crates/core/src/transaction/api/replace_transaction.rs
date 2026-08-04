@@ -1,5 +1,6 @@
 use super::send_transaction::RelayTransactionRequest;
 use crate::app_state::NetworkValidateAction;
+use crate::middleware::policy::PolicyContext;
 use crate::rate_limiting::{RateLimitOperation, RateLimiter};
 use crate::shared::{internal_server_error, not_found, unauthorized, HttpError};
 use crate::transaction::queue_system::ReplaceTransactionResult;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 pub async fn replace_transaction(
     State(state): State<Arc<AppState>>,
     Path(transaction_id): Path<TransactionId>,
+    policy_ctx: PolicyContext,
     headers: HeaderMap,
     Json(replace_with): Json<RelayTransactionRequest>,
 ) -> Result<Json<ReplaceTransactionResult>, HttpError> {
@@ -33,6 +35,8 @@ pub async fn replace_transaction(
     if state.relayer_internal_only.restricted(&transaction.from, &transaction.chain_id) {
         return Err(unauthorized(Some("Relayer can only be used internally".to_string())));
     }
+
+    state.validate_request_policy(&policy_ctx, &headers, &transaction.from, &transaction.chain_id)?;
 
     state.network_permission_validate(
         &transaction.from,

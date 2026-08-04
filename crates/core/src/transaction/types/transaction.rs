@@ -82,6 +82,12 @@ pub struct Transaction {
     #[serde(rename = "sentAt", skip_serializing_if = "Option::is_none", default)]
     pub sent_at: Option<DateTime<Utc>>,
 
+    #[serde(rename = "failedAt", skip_serializing_if = "Option::is_none", default)]
+    pub failed_at: Option<DateTime<Utc>>,
+
+    #[serde(rename = "failedReason", skip_serializing_if = "Option::is_none", default)]
+    pub failed_reason: Option<String>,
+
     #[serde(rename = "confirmedAt", skip_serializing_if = "Option::is_none", default)]
     pub confirmed_at: Option<DateTime<Utc>>,
 
@@ -128,6 +134,17 @@ impl Transaction {
     /// * `bool` - True if the transaction has a sent_at timestamp
     pub fn has_been_sent_before(&self) -> bool {
         self.sent_at.is_some()
+    }
+
+    pub fn failed_on_send_status(&self) -> TransactionStatus {
+        if self.status == TransactionStatus::PENDING
+            && self.known_transaction_hash.is_none()
+            && self.sent_at.is_none()
+        {
+            TransactionStatus::FAILED
+        } else {
+            self.status
+        }
     }
 
     /// Converts this transaction to an EIP-1559 typed transaction.
@@ -296,5 +313,69 @@ impl Transaction {
     /// * `bool` - True if the transaction has blob data
     pub fn is_blob_transaction(&self) -> bool {
         self.blobs.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{network::ChainId, relayer::RelayerId, shared::common_types::EvmAddress};
+    use alloy::primitives::TxHash;
+
+    fn pending_transaction() -> Transaction {
+        let now = Utc::now();
+        Transaction {
+            id: TransactionId::new(),
+            relayer_id: RelayerId::new(),
+            to: EvmAddress::zero(),
+            from: EvmAddress::zero(),
+            value: TransactionValue::zero(),
+            data: TransactionData::empty(),
+            nonce: TransactionNonce::new(0),
+            chain_id: ChainId::new(1),
+            gas_limit: None,
+            status: TransactionStatus::PENDING,
+            blobs: None,
+            known_transaction_hash: None,
+            queued_at: now,
+            expires_at: now,
+            sent_at: None,
+            failed_at: None,
+            failed_reason: None,
+            mined_at: None,
+            mined_at_block_number: None,
+            confirmed_at: None,
+            speed: TransactionSpeed::FAST,
+            sent_with_max_priority_fee_per_gas: None,
+            sent_with_max_fee_per_gas: None,
+            is_noop: false,
+            sent_with_gas: None,
+            sent_with_blob_gas: None,
+            external_id: Some("external-id".to_string()),
+            cancelled_by_transaction_id: None,
+        }
+    }
+
+    #[test]
+    fn transaction_failed_on_send_status_terminalizes_unbroadcast_pending() {
+        let transaction = pending_transaction();
+
+        assert_eq!(transaction.failed_on_send_status(), TransactionStatus::FAILED);
+    }
+
+    #[test]
+    fn transaction_failed_on_send_status_preserves_broadcasted_state() {
+        let mut transaction = pending_transaction();
+        transaction.known_transaction_hash = Some(TransactionHash::new(TxHash::repeat_byte(1)));
+
+        assert_eq!(transaction.failed_on_send_status(), TransactionStatus::PENDING);
+    }
+
+    #[test]
+    fn transaction_failed_on_send_status_preserves_non_pending_state() {
+        let mut transaction = pending_transaction();
+        transaction.status = TransactionStatus::INMEMPOOL;
+
+        assert_eq!(transaction.failed_on_send_status(), TransactionStatus::INMEMPOOL);
     }
 }
