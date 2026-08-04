@@ -5,7 +5,10 @@ on:
   push:
     branches:
       - 'release/**'
+      - 'fiet/v0.14'
       - 'master'
+    tags:
+      - 'fiet-v*'
   pull_request:
     branches:
       - 'master'
