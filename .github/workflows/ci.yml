@@ -832,6 +832,9 @@ jobs:
   docker:
     name: Build and Publish Docker Image
     needs: release
+    permissions:
+      contents: read
+      packages: write
     if: |
       github.actor != 'github-actions[bot]' &&
       github.ref == 'refs/heads/master' &&

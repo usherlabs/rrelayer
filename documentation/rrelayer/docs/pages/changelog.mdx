@@ -10,6 +10,12 @@
 
 ### Bug fixes
 
+- Preserve accepted transaction submissions before a broadcast hash exists. Direct and random
+  sends return HTTP 200 with `hash: null`; SDK callers poll by transaction ID and the CLI displays
+  `<pending>` instead of treating acceptance as a server error.
+- Persist exact signed broadcast hashes and gas snapshots before RPC send, and recover ambiguous
+  attempts from live transaction rows plus ordered audit history without reusing protected nonces.
+
 ---
 
 ### Breaking changes

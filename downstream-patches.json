@@ -24,7 +24,9 @@
       "affected_paths": [
         "crates/core/src/transaction",
         "crates/core/src/relayer",
-        "crates/core/src/schema"
+        "crates/core/src/provider",
+        "crates/core/src/schema",
+        "crates/core/src/wallet"
       ],
       "affected_behaviors": [
         "persist signed hash and applicable gas before provider send",
@@ -59,6 +61,7 @@
       ],
       "affected_paths": [
         "crates/core/src/transaction/api",
+        "crates/core/src/transaction/queue_system",
         "crates/cli/src/commands/tx.rs",
         "crates/sdk",
         "sdk/typescript",
