@@ -33,6 +33,7 @@ jobs:
       - name: Check out immutable canonical baseline
         uses: actions/checkout@v4
         with:
+          repository: joshstevens19/rrelayer
           ref: v0.14.0
 
       - name: Verify canonical baseline identity
@@ -58,5 +59,7 @@ jobs:
 
       - name: Clean up E2E services
         if: always()
-        working-directory: crates/e2e-tests
-        run: docker compose down --volumes --remove-orphans
+        run: |
+          if test -f crates/e2e-tests/docker-compose.yml; then
+            docker compose --file crates/e2e-tests/docker-compose.yml down --volumes --remove-orphans
+          fi
