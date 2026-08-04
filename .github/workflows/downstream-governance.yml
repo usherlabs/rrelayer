@@ -1,0 +1,43 @@
+name: Downstream governance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'fiet/v0.14'
+  pull_request:
+    branches:
+      - 'fiet/v0.14'
+
+permissions:
+  contents: read
+
+jobs:
+  baseline-and-ledger:
+    name: Canonical baseline and patch ledger
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate downstream patch ledger schema
+        run: >-
+          npx --yes ajv-cli@5.0.0 validate
+          --spec=draft2020
+          --strict=true
+          -s schemas/downstream-patches.schema.json
+          -d downstream-patches.json
+
+      - name: Reject duplicate downstream patch IDs
+        run: >-
+          jq -e '[.patches[].id] as $ids |
+          ($ids | length) == ($ids | unique | length)'
+          downstream-patches.json
+
+      - name: Verify exact canonical baseline ancestry
+        run: bash scripts/test-verify-canonical-baseline.sh
