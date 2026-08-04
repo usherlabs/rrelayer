@@ -197,11 +197,11 @@ permissions:
   - relayers: "*"
     allowlist: []
     ip_allowlist:
-      - 18.223.74.85/32
+      - 192.0.2.10/32
     request_verification:
       scheme: jwt_hs256
       params:
-        secret_env: APPSMITH_SIGNATURE_KEY
+        secret_env: RRELAYER_REQUEST_SIGNATURE_KEY
         signature_header: x-appsmith-signature
 ```
 
