@@ -61,7 +61,8 @@
       "rationale": "Treat durable queue acceptance as HTTP success even when broadcast has not produced a transaction hash, while keeping the response explicit and pollable by ID.",
       "status": "active",
       "source_commits": [
-        "06d457b27819ce68e76d32e345e9238a5bae19fb"
+        "06d457b27819ce68e76d32e345e9238a5bae19fb",
+        "79bc8061820fbb035a02cd15d2bafde08df2b56d"
       ],
       "affected_paths": [
         "crates/core/src/transaction/api",
@@ -74,6 +75,7 @@
       "affected_behaviors": [
         "return HTTP 200 with a present null hash after durable acceptance",
         "represent a pending accepted hash in Rust and TypeScript SDKs",
+        "poll an accepted transaction by ID before EIP-1193 clients require its hash",
         "display pending accepted submissions in the CLI"
       ],
       "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
@@ -82,7 +84,7 @@
       ],
       "regression_tests": [
         "cargo test -p rrelayer_core --lib --locked send_transaction",
-        "npm --prefix sdk/typescript run build"
+        "npm --prefix sdk/typescript test"
       ],
       "upstream": {
         "status": "submitted",
