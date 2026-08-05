@@ -1,0 +1,28 @@
+name: Compare canonical rrelayer
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Report canonical release drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare the recorded canonical baseline
+        run: bash scripts/report-canonical-sync.sh "$RUNNER_TEMP/rrelayer-canonical-sync.md"
+
+      - name: Upload comparison report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrelayer-canonical-sync
+          path: ${{ runner.temp }}/rrelayer-canonical-sync.md
+          if-no-files-found: error

@@ -15,10 +15,14 @@ mapfile -t affected_paths < <(
 )
 
 release_metadata=(
+  ".github/workflows/canonical-sync.yml"
   ".github/workflows/downstream-governance.yml"
   "downstream-patches.json"
   "schemas/downstream-patches.schema.json"
+  "scripts/report-canonical-sync.sh"
   "scripts/test-downstream-patch-coverage.sh"
+  "scripts/test-downstream-patches-schema.sh"
+  "scripts/test-report-canonical-sync.sh"
   "scripts/test-verify-canonical-baseline.sh"
   "scripts/verify-canonical-baseline.sh"
 )

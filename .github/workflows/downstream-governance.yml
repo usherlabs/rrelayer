@@ -26,12 +26,7 @@ jobs:
           node-version: 24
 
       - name: Validate downstream patch ledger schema
-        run: >-
-          npx --yes ajv-cli@5.0.0 validate
-          --spec=draft2020
-          --strict=true
-          -s schemas/downstream-patches.schema.json
-          -d downstream-patches.json
+        run: bash scripts/test-downstream-patches-schema.sh
 
       - name: Reject duplicate downstream patch IDs
         run: >-
@@ -44,3 +39,6 @@ jobs:
 
       - name: Verify exact canonical baseline ancestry
         run: bash scripts/test-verify-canonical-baseline.sh
+
+      - name: Test non-mutating canonical comparison
+        run: bash scripts/test-report-canonical-sync.sh

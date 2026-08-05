@@ -49,7 +49,10 @@
         "cargo test -p rrelayer_core --lib --locked nonce",
         "cargo test -p rrelayer_core --lib --locked recovery"
       ],
-      "upstream": { "status": "planned" }
+      "upstream": {
+        "status": "submitted",
+        "url": "https://github.com/joshstevens19/rrelayer/pull/120"
+      }
     },
     {
       "id": "accepted-response",
@@ -81,7 +84,10 @@
         "cargo test -p rrelayer_core --lib --locked send_transaction",
         "npm --prefix sdk/typescript run build"
       ],
-      "upstream": { "status": "planned" }
+      "upstream": {
+        "status": "submitted",
+        "url": "https://github.com/joshstevens19/rrelayer/pull/119"
+      }
     },
     {
       "id": "request-policy",
@@ -132,7 +138,10 @@
         "cargo test -p rrelayer_core --lib --locked policy",
         "cargo test -p rrelayer_core --lib --locked request_policy"
       ],
-      "upstream": { "status": "planned" }
+      "upstream": {
+        "status": "submitted",
+        "url": "https://github.com/joshstevens19/rrelayer/pull/121"
+      }
     },
     {
       "id": "reproducible-lock",
