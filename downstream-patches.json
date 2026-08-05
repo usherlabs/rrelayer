@@ -138,7 +138,10 @@
         "cargo test -p rrelayer_core --lib --locked policy",
         "cargo test -p rrelayer_core --lib --locked request_policy"
       ],
-      "upstream": { "status": "planned" }
+      "upstream": {
+        "status": "submitted",
+        "url": "https://github.com/joshstevens19/rrelayer/pull/121"
+      }
     },
     {
       "id": "reproducible-lock",
