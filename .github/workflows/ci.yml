@@ -42,6 +42,8 @@ jobs:
   downstream_integrity_policy:
     name: Downstream Integrity and Policy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,11 +59,11 @@ jobs:
         run: cargo test -p rrelayer_core --lib --locked
       - name: Check locked release CLI
         run: cargo check -p rrelayer_cli --release --locked
-      - name: Build TypeScript SDK
+      - name: Build and test TypeScript SDK
         working-directory: sdk/typescript
         run: |
           npm ci
-          npm run build
+          npm test
 
   e2e_raw:
     name: E2E Raw Provider
