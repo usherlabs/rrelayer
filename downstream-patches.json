@@ -19,7 +19,8 @@
         "ccfdc754dd29061bd08efa2a99aa3201247fb408",
         "4d97a7a5a7aa495ee56dc60c077436490e9b69bd",
         "ccec4542dbbfae033edaf70b168da51e79c6252d",
-        "b7d38dfa27267f7cad39f3ae3ffc9ed248efdd4d"
+        "b7d38dfa27267f7cad39f3ae3ffc9ed248efdd4d",
+        "8a6b351e364c93660fdb594b90904b0b72b434a5"
       ],
       "affected_paths": [
         "crates/core/src/transaction",
@@ -33,6 +34,7 @@
         "persist signed hash and applicable gas before provider send",
         "recover ambiguous attempts from the live row and audit history",
         "persist database repair before advancing in-memory nonce state",
+        "terminalize absent stale same-nonce competitors without assigning a fresh nonce",
         "preserve stable live wallet-index namespaces"
       ],
       "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
@@ -47,7 +49,8 @@
       "regression_tests": [
         "cargo test -p rrelayer_core --lib --locked transaction",
         "cargo test -p rrelayer_core --lib --locked nonce",
-        "cargo test -p rrelayer_core --lib --locked recovery"
+        "cargo test -p rrelayer_core --lib --locked recovery",
+        "cargo test -p rrelayer_core --lib --locked stale_same_nonce_competitor_is_terminalized_instead_of_replayed"
       ],
       "upstream": {
         "status": "submitted",
@@ -157,6 +160,7 @@
         "c73b500cc3a1f8f5b533d42ec6fc3ea037d42ff2"
       ],
       "affected_paths": [
+        "CONTRIBUTING.md",
         ".gitignore",
         "Cargo.lock",
         ".github/workflows",
