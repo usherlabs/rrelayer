@@ -160,6 +160,7 @@
         "c73b500cc3a1f8f5b533d42ec6fc3ea037d42ff2"
       ],
       "affected_paths": [
+        "CONTRIBUTING.md",
         ".gitignore",
         "Cargo.lock",
         ".github/workflows",
