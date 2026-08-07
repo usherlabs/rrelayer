@@ -13,6 +13,14 @@ use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
 
 use crate::shared::from_param_u256;
 
+const BLOCK_HASH_BYTE_LENGTH: usize = 32;
+
+#[derive(Debug, thiserror::Error)]
+enum BlockHashSqlError {
+    #[error("Invalid byte length for block hash: expected {expected}, got {actual}")]
+    InvalidByteLength { expected: usize, actual: usize },
+}
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq)]
 pub struct BlockHash(B256);
 
@@ -36,11 +44,11 @@ impl PartialEq for BlockHash {
 
 impl<'a> FromSql<'a> for BlockHash {
     fn from_sql(_ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn Error + Sync + Send>> {
-        if raw.len() != 32 {
-            return Err(format!(
-                "Invalid byte length for block hash: expected 32, got {}",
-                raw.len()
-            )
+        if raw.len() != BLOCK_HASH_BYTE_LENGTH {
+            return Err(BlockHashSqlError::InvalidByteLength {
+                expected: BLOCK_HASH_BYTE_LENGTH,
+                actual: raw.len(),
+            }
             .into());
         }
 
@@ -134,7 +142,11 @@ mod tests {
     #[test]
     fn block_hash_bytea_rejects_invalid_length() {
         let err = BlockHash::from_sql(&Type::BYTEA, &[0xab; 31]).unwrap_err();
+        let err = err.downcast::<BlockHashSqlError>().unwrap();
 
-        assert_eq!("Invalid byte length for block hash: expected 32, got 31", err.to_string());
+        assert!(matches!(
+            *err,
+            BlockHashSqlError::InvalidByteLength { expected: BLOCK_HASH_BYTE_LENGTH, actual: 31 }
+        ));
     }
 }

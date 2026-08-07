@@ -174,11 +174,12 @@
         "crates/core/src/transaction/queue_system/transactions_queues.rs",
         "crates/core/src/wallet/aws_kms_wallet_manager.rs",
         "crates/sdk/src/api/http.rs",
-        "documentation/rrelayer/docs/pages/changelog.mdx"
+        "documentation/rrelayer/docs/pages/changelog.mdx",
+        "scripts/migrate-legacy-block-hashes.sql"
       ],
       "affected_behaviors": [
         "estimate gas without treating a synthetic transaction value as a ceiling",
-        "persist block hashes as exactly 32 raw bytes and reject invalid lengths",
+        "migrate legacy ASCII block hashes and persist exactly 32 raw bytes",
         "decode successful optional SDK responses without rejecting JSON null",
         "return a typed error instead of panicking on unsupported Safe signatures",
         "create KMS keys only after a typed not-found alias response"
