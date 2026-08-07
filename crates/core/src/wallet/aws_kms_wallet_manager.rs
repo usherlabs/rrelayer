@@ -10,13 +10,14 @@ use alloy::signers::{aws::AwsSigner, Signer};
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_kms::{
+    error::SdkError,
+    operation::describe_key::{DescribeKeyError, DescribeKeyOutput},
     types::{KeySpec, KeyUsageType, Tag},
     Client,
 };
 use aws_sdk_sts::Client as StsClient;
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, fmt::Debug as StdDebug, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -83,13 +84,8 @@ impl AwsKmsWalletManager {
         chain_id: &ChainId,
     ) -> Result<GetOrCreateKeyId, WalletError> {
         self.validate_aws_config().await?;
-        match self.find_key_by_alias(wallet_index, chain_id).await {
-            Ok(key_id) => {
-                return Ok(GetOrCreateKeyId::Existing(key_id));
-            }
-            Err(e) => {
-                debug!("AWS KMS: No existing key found: {}", e);
-            }
+        if let Some(key_id) = self.find_key_by_alias(wallet_index, chain_id).await? {
+            return Ok(GetOrCreateKeyId::Existing(key_id));
         }
 
         info!("AWS KMS: Creating new key for wallet_index {}", wallet_index);
@@ -120,7 +116,7 @@ impl AwsKmsWalletManager {
         &self,
         wallet_index: u32,
         chain_id: &ChainId,
-    ) -> Result<String, WalletError> {
+    ) -> Result<Option<String>, WalletError> {
         let expected_alias = self.build_alias(wallet_index, chain_id);
         info!("AWS KMS: Looking for key with alias: {}", expected_alias);
 
@@ -128,11 +124,21 @@ impl AwsKmsWalletManager {
         let kms = Client::new(&aws_config);
 
         // AWS KMS DescribeKey accepts an alias directly as the key-id parameter
-        let result = kms.describe_key().key_id(&expected_alias).send().await.map_err(|e| {
-            WalletError::ApiError {
-                message: format!("No KMS key found for alias {}: {:?}", expected_alias, e),
+        let result = match kms.describe_key().key_id(&expected_alias).send().await {
+            Ok(result) => result,
+            Err(e) if Self::is_describe_key_not_found(&e) => {
+                debug!("AWS KMS: No KMS key found for alias {}", expected_alias);
+                return Ok(None);
             }
-        })?;
+            Err(e) => {
+                return Err(WalletError::ApiError {
+                    message: format!(
+                        "Failed to describe KMS key alias {}: {:?}",
+                        expected_alias, e
+                    ),
+                });
+            }
+        };
 
         let key_id = result.key_metadata().map(|m| m.key_id().to_string()).ok_or_else(|| {
             WalletError::ApiError {
@@ -140,7 +146,29 @@ impl AwsKmsWalletManager {
             }
         })?;
 
-        Ok(key_id)
+        Ok(Some(key_id))
+    }
+
+    fn is_describe_key_not_found<R>(error: &SdkError<DescribeKeyError, R>) -> bool {
+        error.as_service_error().is_some_and(DescribeKeyError::is_not_found_exception)
+    }
+
+    fn existing_alias_key_id<R: StdDebug>(
+        alias_name: &str,
+        describe_result: Result<DescribeKeyOutput, SdkError<DescribeKeyError, R>>,
+    ) -> Result<Option<String>, WalletError> {
+        match describe_result {
+            Ok(existing) => existing
+                .key_metadata()
+                .map(|metadata| Some(metadata.key_id().to_string()))
+                .ok_or_else(|| WalletError::ApiError {
+                    message: format!("No key metadata returned for alias: {}", alias_name),
+                }),
+            Err(e) if Self::is_describe_key_not_found(&e) => Ok(None),
+            Err(e) => Err(WalletError::ApiError {
+                message: format!("Failed to describe KMS key alias {}: {:?}", alias_name, e),
+            }),
+        }
     }
 
     async fn create_key_for_wallet_index(
@@ -188,18 +216,24 @@ impl AwsKmsWalletManager {
             }
         }
 
-        let key_id = self.get_or_create_key_id(wallet_index, lookup_chain_id).await?;
-        if matches!(chain_id, WalletManagerChainId::Cloned(_))
-            && matches!(key_id, GetOrCreateKeyId::Created(_))
-        {
-            return Err(WalletError::ApiError {
-                message: format!(
-                    "Cloned wallet (index: {}, lookup_chain: {}) should use existing KMS key but alias not found. \
-                     Created key would have wrong address. Check that the original KMS key alias exists.",
-                    wallet_index, lookup_chain_id
-                ),
-            });
-        }
+        let key_id = match &chain_id {
+            WalletManagerChainId::Cloned(_) => {
+                self.validate_aws_config().await?;
+                self.find_key_by_alias(wallet_index, lookup_chain_id)
+                    .await?
+                    .map(GetOrCreateKeyId::Existing)
+                    .ok_or_else(|| WalletError::ApiError {
+                        message: format!(
+                            "Cloned wallet (index: {}, lookup_chain: {}) requires an existing KMS key alias. \
+                             Check that the original KMS key alias exists.",
+                            wallet_index, lookup_chain_id
+                        ),
+                    })?
+            }
+            WalletManagerChainId::ChainId(_) => {
+                self.get_or_create_key_id(wallet_index, lookup_chain_id).await?
+            }
+        };
 
         let signer =
             self.initialize_aws_kms_signer(key_id.item(), Some(signing_chain_id.u64())).await?;
@@ -435,6 +469,7 @@ impl AwsKmsWalletManager {
         let metadata = key_info.key_metadata().ok_or_else(|| WalletError::ApiError {
             message: format!("No metadata returned for KMS key {}", kms_key_id),
         })?;
+        let canonical_key_id = metadata.key_id().to_string();
 
         // Verify it's the right key type for Ethereum signing
         if metadata.key_spec() != Some(&KeySpec::EccSecgP256K1) {
@@ -457,37 +492,37 @@ impl AwsKmsWalletManager {
             });
         }
 
-        // Check if the alias already exists via direct describe_key lookup
-        if let Ok(existing) = kms.describe_key().key_id(&alias_name).send().await {
-            if let Some(existing_metadata) = existing.key_metadata() {
-                let existing_key_id = existing_metadata.key_id();
-                if existing_key_id == kms_key_id {
-                    info!(
-                        "AWS KMS: Alias {} already exists and points to the correct key",
-                        alias_name
-                    );
-                    return Ok(alias_name);
-                } else {
-                    return Err(WalletError::ApiError {
-                        message: format!(
-                            "Alias {} already exists but points to a different key {}",
-                            alias_name, existing_key_id
-                        ),
-                    });
-                }
+        let existing_alias_key_id = Self::existing_alias_key_id(
+            &alias_name,
+            kms.describe_key().key_id(&alias_name).send().await,
+        )?;
+        if let Some(existing_key_id) = existing_alias_key_id {
+            if existing_key_id == canonical_key_id {
+                info!("AWS KMS: Alias {} already exists and points to the correct key", alias_name);
+                return Ok(alias_name);
+            } else {
+                return Err(WalletError::ApiError {
+                    message: format!(
+                        "Alias {} already exists but points to a different key {}",
+                        alias_name, existing_key_id
+                    ),
+                });
             }
         }
 
-        kms.create_alias().alias_name(&alias_name).target_key_id(kms_key_id).send().await.map_err(
-            |e| WalletError::ApiError {
+        kms.create_alias()
+            .alias_name(&alias_name)
+            .target_key_id(&canonical_key_id)
+            .send()
+            .await
+            .map_err(|e| WalletError::ApiError {
                 message: format!(
                     "Failed to create alias {} for key {}: {:?}",
-                    alias_name, kms_key_id, e
+                    alias_name, canonical_key_id, e
                 ),
-            },
-        )?;
+            })?;
 
-        info!("AWS KMS: Successfully created alias {} for key {}", alias_name, kms_key_id);
+        info!("AWS KMS: Successfully created alias {} for key {}", alias_name, canonical_key_id);
 
         Ok(alias_name)
     }
@@ -609,5 +644,107 @@ impl WalletManagerTrait for AwsKmsWalletManager {
         let key_alias = self.assign_alias_to_existing_key(key_id, wallet_index, chain_id).await?;
 
         Ok(ImportKeyResult { key_alias })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_kms::{
+        error::{ErrorMetadata, SdkError},
+        types::{error::NotFoundException, KeyMetadata},
+    };
+
+    #[test]
+    fn describe_key_classifier_only_treats_typed_not_found_as_missing_alias() {
+        let not_found = DescribeKeyError::NotFoundException(
+            NotFoundException::builder().message("missing alias").build(),
+        );
+        let not_found_error: SdkError<DescribeKeyError, ()> =
+            SdkError::service_error(not_found, ());
+        assert!(AwsKmsWalletManager::is_describe_key_not_found(&not_found_error));
+
+        let throttled = DescribeKeyError::generic(
+            ErrorMetadata::builder().code("ThrottlingException").message("rate limited").build(),
+        );
+        let throttled_error: SdkError<DescribeKeyError, ()> =
+            SdkError::service_error(throttled, ());
+        assert!(!AwsKmsWalletManager::is_describe_key_not_found(&throttled_error));
+
+        let timeout_error: SdkError<DescribeKeyError, ()> =
+            SdkError::timeout_error(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"));
+        assert!(!AwsKmsWalletManager::is_describe_key_not_found(&timeout_error));
+    }
+
+    #[test]
+    fn alias_lookup_decision_only_treats_not_found_as_missing_alias() {
+        let alias = "alias/rrelayer-wallet-0-1";
+
+        let existing = DescribeKeyOutput::builder()
+            .key_metadata(KeyMetadata::builder().key_id("canonical-key").build().unwrap())
+            .build();
+        assert_eq!(
+            AwsKmsWalletManager::existing_alias_key_id::<()>(alias, Ok(existing))
+                .unwrap()
+                .as_deref(),
+            Some("canonical-key")
+        );
+
+        let missing_metadata = AwsKmsWalletManager::existing_alias_key_id::<()>(
+            alias,
+            Ok(DescribeKeyOutput::builder().build()),
+        )
+        .unwrap_err();
+        match missing_metadata {
+            WalletError::ApiError { message } => {
+                assert!(message.contains(alias));
+                assert!(message.contains("No key metadata returned"));
+            }
+            other => panic!("expected api error, got {other:?}"),
+        }
+
+        let not_found = DescribeKeyError::NotFoundException(
+            NotFoundException::builder().message("missing alias").build(),
+        );
+        assert_eq!(
+            AwsKmsWalletManager::existing_alias_key_id(
+                alias,
+                Err(SdkError::service_error(not_found, ())),
+            )
+            .unwrap(),
+            None
+        );
+
+        let throttled = DescribeKeyError::generic(
+            ErrorMetadata::builder().code("ThrottlingException").message("rate limited").build(),
+        );
+        let throttled_error = AwsKmsWalletManager::existing_alias_key_id(
+            alias,
+            Err(SdkError::service_error(throttled, ())),
+        )
+        .unwrap_err();
+        match throttled_error {
+            WalletError::ApiError { message } => {
+                assert!(message.contains(alias));
+                assert!(message.contains("rate limited"));
+            }
+            other => panic!("expected api error, got {other:?}"),
+        }
+
+        let timeout_error = AwsKmsWalletManager::existing_alias_key_id::<()>(
+            alias,
+            Err(SdkError::timeout_error(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timeout",
+            ))),
+        )
+        .unwrap_err();
+        match timeout_error {
+            WalletError::ApiError { message } => {
+                assert!(message.contains(alias));
+                assert!(message.contains("timeout"));
+            }
+            other => panic!("expected api error, got {other:?}"),
+        }
     }
 }

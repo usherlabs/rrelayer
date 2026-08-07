@@ -16,6 +16,11 @@
 - Persist exact signed broadcast hashes and gas snapshots before RPC send, and recover ambiguous
   attempts from live transaction rows plus ordered audit history without reusing protected nonces.
 - fix: prevent stale same-nonce replacement and cancellation attempts from replaying at a fresh nonce
+- fix: estimate transaction gas without imposing a synthetic one-million-gas ceiling
+- fix: persist block hashes as 32 raw bytes and reject invalid stored lengths
+- fix: decode missing transaction responses as `None` in Rust SDK optional reads
+- fix: return a typed error instead of panicking when Safe signatures are unsupported
+- fix: create AWS KMS keys only when alias lookup confirms that the alias is missing
 
 ---
 

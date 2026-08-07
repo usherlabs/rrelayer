@@ -361,10 +361,6 @@ impl TransactionsQueues {
         gas_price: &GasPriceResult,
         blob_gas_price: Option<&BlobGasPriceResult>,
     ) -> Result<GasLimit, AddTransactionError> {
-        // Use a reasonable temporary limit for gas estimation
-        const TEMP_GAS_LIMIT: u128 = 1_000_000;
-        let temp_gas_limit = GasLimit::new(TEMP_GAS_LIMIT);
-
         let current_onchain_nonce = transactions_queue.get_nonce().await.map_err(|e| {
             AddTransactionError::CouldNotGetCurrentOnChainNonce(transaction.relayer_id, e)
         })?;
@@ -372,12 +368,14 @@ impl TransactionsQueues {
         let mut estimation_transaction = transaction.clone();
         estimation_transaction.nonce = current_onchain_nonce;
 
+        // Typed transactions require a gas limit, but EvmProvider strips this
+        // placeholder before eth_estimateGas so it cannot cap simulation.
         let temp_transaction_request = Self::create_typed_transaction(
             transactions_queue,
             &estimation_transaction,
             gas_price,
             blob_gas_price,
-            temp_gas_limit,
+            GasLimit::new(1),
         )?;
 
         let estimated_gas_limit = transactions_queue
