@@ -25,7 +25,7 @@ pub struct RepairedPoisonedPendingTransactions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RepairedAbsentFutureNoncePendingTransactions {
+pub struct RepairedAbsentPendingTransactions {
     pub count: i64,
     pub min_nonce: Option<TransactionNonce>,
     pub max_nonce: Option<TransactionNonce>,
@@ -427,15 +427,15 @@ impl PostgresClient {
         })
     }
 
-    pub async fn repair_absent_future_nonce_pending_transactions_for_relayer(
+    pub async fn repair_absent_pending_transactions_for_relayer(
         &self,
         relayer_id: &RelayerId,
         chain_nonce: &TransactionNonce,
         checked_absent_transactions: &[(TransactionId, Vec<TransactionHash>)],
         failed_reason: &str,
-    ) -> Result<RepairedAbsentFutureNoncePendingTransactions, PostgresError> {
+    ) -> Result<RepairedAbsentPendingTransactions, PostgresError> {
         if checked_absent_transactions.is_empty() {
-            return Ok(RepairedAbsentFutureNoncePendingTransactions {
+            return Ok(RepairedAbsentPendingTransactions {
                 count: 0,
                 min_nonce: None,
                 max_nonce: None,
@@ -473,7 +473,7 @@ impl PostgresClient {
                                     AND attempts.hash IS NOT NULL
                                     AND NOT (attempts.hash = ANY($7::BYTEA[]))
                               )
-                              AND nonce > $6
+                              AND nonce <> $6
                             RETURNING *
                         ), audit AS (
                             INSERT INTO relayer.transaction_audit_log (
@@ -533,7 +533,7 @@ impl PostgresClient {
 
         trans.commit().await.map_err(PostgresError::PgError)?;
 
-        Ok(RepairedAbsentFutureNoncePendingTransactions { count, min_nonce, max_nonce })
+        Ok(RepairedAbsentPendingTransactions { count, min_nonce, max_nonce })
     }
 
     pub async fn transaction_failed_on_send(

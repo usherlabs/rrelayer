@@ -15,6 +15,7 @@
   `<pending>` instead of treating acceptance as a server error.
 - Persist exact signed broadcast hashes and gas snapshots before RPC send, and recover ambiguous
   attempts from live transaction rows plus ordered audit history without reusing protected nonces.
+- fix: prevent stale same-nonce replacement and cancellation attempts from replaying at a fresh nonce
 
 ---
 

@@ -372,13 +372,13 @@ pub(super) fn effective_startup_nonce(
     TransactionNonce::new(onchain_nonce.into_inner().max(next_after_actionable))
 }
 
-pub(super) fn future_nonce_pending_repair_hash(
+pub(super) fn non_current_nonce_pending_repair_hash(
     transaction: &Transaction,
     chain_nonce: TransactionNonce,
 ) -> Option<crate::transaction::types::TransactionHash> {
     if transaction.status == TransactionStatus::PENDING
         && transaction.sent_at.is_some()
-        && transaction.nonce.into_inner() > chain_nonce.into_inner()
+        && transaction.nonce != chain_nonce
     {
         transaction.known_transaction_hash
     } else {
@@ -494,17 +494,17 @@ async fn repair_recorded_attempts_for_relayer(
                     transaction.id,
                 ));
             }
-        } else if future_nonce_pending_repair_hash(&transaction, chain_nonce).is_some() {
+        } else if non_current_nonce_pending_repair_hash(&transaction, chain_nonce).is_some() {
             absent.push((transaction.id, attempts.iter().map(|attempt| attempt.hash).collect()));
         }
     }
 
     let repair_result = db
-        .repair_absent_future_nonce_pending_transactions_for_relayer(
+        .repair_absent_pending_transactions_for_relayer(
             &relayer.id,
             &chain_nonce,
             &absent,
-            "startup repair: terminalized broadcast-absent future-nonce pending transaction",
+            "startup repair: terminalized broadcast-absent pending transaction outside the current chain nonce",
         )
         .await
         .map_err(|error| {
@@ -864,19 +864,46 @@ mod tests {
     }
 
     #[test]
-    fn future_nonce_terminalization_requires_complete_attempt_markers() {
+    fn non_current_nonce_terminalization_requires_complete_attempt_markers() {
         let mut transaction = pending_transaction(9);
         let hash = TransactionHash::new(TxHash::repeat_byte(9));
 
-        assert_eq!(future_nonce_pending_repair_hash(&transaction, TransactionNonce::new(7)), None);
+        assert_eq!(
+            non_current_nonce_pending_repair_hash(&transaction, TransactionNonce::new(7)),
+            None
+        );
 
         transaction.known_transaction_hash = Some(hash);
         transaction.sent_at = Some(Utc::now());
 
         assert_eq!(
-            future_nonce_pending_repair_hash(&transaction, TransactionNonce::new(7)),
+            non_current_nonce_pending_repair_hash(&transaction, TransactionNonce::new(7)),
             Some(hash)
         );
-        assert_eq!(future_nonce_pending_repair_hash(&transaction, TransactionNonce::new(10)), None);
+        assert_eq!(
+            non_current_nonce_pending_repair_hash(&transaction, TransactionNonce::new(10)),
+            Some(hash)
+        );
+        assert_eq!(
+            non_current_nonce_pending_repair_hash(&transaction, TransactionNonce::new(9)),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_same_nonce_competitor_is_terminalized_instead_of_replayed() {
+        let mut transaction = pending_transaction(4);
+        let hash = TransactionHash::new(TxHash::repeat_byte(4));
+        transaction.known_transaction_hash = Some(hash);
+        transaction.sent_at = Some(Utc::now());
+
+        assert_eq!(
+            non_current_nonce_pending_repair_hash(&transaction, TransactionNonce::new(5)),
+            Some(hash)
+        );
+        assert_eq!(
+            non_current_nonce_pending_repair_hash(&transaction, TransactionNonce::new(4)),
+            None
+        );
     }
 }
