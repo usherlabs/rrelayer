@@ -894,6 +894,10 @@ mod tests {
     fn stale_same_nonce_competitor_is_terminalized_instead_of_replayed() {
         let mut transaction = pending_transaction(4);
         let hash = TransactionHash::new(TxHash::repeat_byte(4));
+        // CompetitionType exists only in memory after a successful competitor send.
+        // A failed cancellation attempt restarts as this ordinary PENDING row,
+        // retaining its cancel external ID, original nonce and durable attempt.
+        transaction.external_id = Some("cancel_original-transaction-id".to_string());
         transaction.known_transaction_hash = Some(hash);
         transaction.sent_at = Some(Utc::now());
 
