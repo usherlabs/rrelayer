@@ -151,6 +151,57 @@
       }
     },
     {
+      "id": "runtime-invariants",
+      "title": "Relayer runtime correctness invariants",
+      "owner": "usherlabs",
+      "rationale": "Restore transaction, persistence, SDK, Safe, and KMS invariants that were previously carried by the embedded downstream runtime but were absent after reconciling onto canonical v0.14 source.",
+      "status": "active",
+      "source_commits": [
+        "546dda7f7b8f12a483c8e1ceb8491020b52dd0c9",
+        "d801b9de5c0ccb0b375eb006f1a97d436c1d3845",
+        "29e0dc9a38e1a11a04decbeb4d23e89734945a59",
+        "eb01a9cfd8619d7e168d30bfdd6709bf413a977d",
+        "f9258df11488a8f90ccc44715231e412623bc872",
+        "f5c104248ef65bf25c8ca704ebfd26559a50307d",
+        "88ce0c3db40aff04042542964df77c32217f6db9",
+        "e626827529de5d83b8365b9f9a2e7032da23f7a5",
+        "f9ebaf29a18a69b7a1fbb0bc3a4633eda662bbe7"
+      ],
+      "affected_paths": [
+        "crates/core/src/provider/evm_provider.rs",
+        "crates/core/src/safe_proxy.rs",
+        "crates/core/src/shared/common_types/block_hash.rs",
+        "crates/core/src/transaction/queue_system/transactions_queues.rs",
+        "crates/core/src/wallet/aws_kms_wallet_manager.rs",
+        "crates/sdk/src/api/http.rs",
+        "documentation/rrelayer/docs/pages/changelog.mdx",
+        "scripts/migrate-legacy-block-hashes.sql"
+      ],
+      "affected_behaviors": [
+        "estimate gas without treating a synthetic transaction value as a ceiling",
+        "migrate legacy ASCII block hashes and persist exactly 32 raw bytes",
+        "decode successful optional SDK responses without rejecting JSON null",
+        "return a typed error instead of panicking on unsupported Safe signatures",
+        "create KMS keys only after a typed not-found alias response"
+      ],
+      "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+      "requirement_ids": [
+        "rrelayer-runtime-invariants:gas-estimation",
+        "rrelayer-runtime-invariants:block-hash-storage",
+        "rrelayer-runtime-invariants:optional-sdk-reads",
+        "rrelayer-runtime-invariants:safe-errors",
+        "rrelayer-runtime-invariants:kms-alias-lookup"
+      ],
+      "regression_tests": [
+        "cargo test -p rrelayer_core --lib --locked gas_estimation_request_omits_typed_transaction_gas_limit",
+        "cargo test -p rrelayer_core --lib --locked block_hash_bytea",
+        "cargo test -p rrelayer --lib --locked get_or_none",
+        "cargo test -p rrelayer_core --lib --locked create_safe_signature_returns_signature_error_when_unsupported",
+        "cargo test -p rrelayer_core --lib --locked alias_lookup"
+      ],
+      "upstream": { "status": "planned" }
+    },
+    {
       "id": "reproducible-lock",
       "title": "Tracked lockfile for reproducible FIET builds",
       "owner": "csmithington",

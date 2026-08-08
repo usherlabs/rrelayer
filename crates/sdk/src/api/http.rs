@@ -94,8 +94,7 @@ impl HttpClient {
 
         self.handle_response_status(&response)?;
         let response = response.error_for_status()?;
-        let data = response.json::<T>().await?;
-        Ok(Some(data))
+        Ok(response.json::<Option<T>>().await?)
     }
 
     pub async fn get_with_query<T, Q>(&self, endpoint: &str, query: Option<Q>) -> ApiResult<T>
@@ -264,5 +263,81 @@ impl HttpClient {
         response.error_for_status()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    struct TestPayload {
+        value: String,
+    }
+
+    fn client_for_response(status_line: &'static str, body: &'static str) -> HttpClient {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP listener");
+        let addr = listener.local_addr().expect("read listener address");
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test HTTP request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).expect("read test HTTP request");
+            let response = format!(
+                "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write test HTTP response");
+        });
+
+        HttpClient::new(ApiBaseConfig {
+            server_url: format!("http://{addr}"),
+            auth: AuthConfig::BasicAuth {
+                username: "user".to_string(),
+                password: "password".to_string(),
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn get_or_none_treats_404_as_none() {
+        let client = client_for_response("HTTP/1.1 404 Not Found", "not found");
+
+        let result = client
+            .get_or_none::<TestPayload>("transactions/external/missing")
+            .await
+            .expect("404 should be a missing value");
+
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn get_or_none_treats_json_null_as_none() {
+        let client = client_for_response("HTTP/1.1 200 OK", "null");
+
+        let result = client
+            .get_or_none::<TestPayload>("transactions/external/missing")
+            .await
+            .expect("200 null should be a missing value");
+
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn get_or_none_deserializes_json_object_as_some() {
+        let client = client_for_response("HTTP/1.1 200 OK", r#"{"value":"present"}"#);
+
+        let result = client
+            .get_or_none::<TestPayload>("transactions/external/present")
+            .await
+            .expect("object should deserialize");
+
+        assert_eq!(result, Some(TestPayload { value: "present".to_string() }));
     }
 }

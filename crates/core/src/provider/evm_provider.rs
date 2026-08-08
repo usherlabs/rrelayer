@@ -504,10 +504,7 @@ impl EvmProvider {
         transaction: &TypedTransaction,
         from: &EvmAddress,
     ) -> Result<GasLimit, RpcError<TransportErrorKind>> {
-        let mut request: TransactionRequest = transaction.clone().into();
-        // need from here else it will fail gas estimating
-        request.from = Some(from.into_address());
-
+        let request = transaction_request_for_gas_estimation(transaction, from);
         let request_with_other = WithOtherFields::new(request);
 
         let result = self.rpc_client().estimate_gas(request_with_other).await?;
@@ -618,6 +615,44 @@ impl EvmProvider {
     pub fn supports_blobs(&self) -> bool {
         self.wallet_manager.supports_blobs()
     }
+
+    #[cfg(test)]
+    pub(crate) fn mocked(
+        asserter: alloy::transports::mock::Asserter,
+        wallet_manager: Arc<dyn WalletManagerTrait>,
+        gas_estimator: Arc<dyn BaseGasFeeEstimator + Send + Sync>,
+        chain_id: ChainId,
+    ) -> Self {
+        let provider =
+            ProviderBuilder::new().network::<AnyNetwork>().connect_mocked_client(asserter);
+        let provider: RelayerProvider = Box::new(provider);
+
+        Self {
+            rpc_clients: vec![Arc::new(provider)],
+            wallet_manager,
+            gas_estimator,
+            block_gas_limit_cache: Arc::new(Mutex::new(None)),
+            chain_id,
+            name: "mock".to_string(),
+            provider_urls: Vec::new(),
+            blocks_every: 250,
+            confirmations: 1,
+            can_clone: false,
+        }
+    }
+}
+
+fn transaction_request_for_gas_estimation(
+    transaction: &TypedTransaction,
+    from: &EvmAddress,
+) -> TransactionRequest {
+    let mut request: TransactionRequest = transaction.clone().into();
+    // Typed transactions need a gas limit for signing. eth_estimateGas must not
+    // inherit that synthetic value because JSON-RPC treats it as a hard cap.
+    request.gas = None;
+    // The sender is required so nodes simulate against the relayer's balance.
+    request.from = Some(from.into_address());
+    request
 }
 
 async fn pending_nonce_across_clients(
@@ -689,8 +724,9 @@ mod tests {
     use crate::relayer::RelayerId;
     use crate::wallet::WalletManagerChainId;
     use alloy::{
-        consensus::{TxEip4844, TxEip4844Variant, TxEip4844WithSidecar},
-        primitives::{keccak256, Address, TxHash, U256},
+        consensus::{TxEip1559, TxEip4844, TxEip4844Variant, TxEip4844WithSidecar},
+        eips::eip2930::AccessList,
+        primitives::{keccak256, Address, TxHash, TxKind, U256},
         providers::ProviderBuilder,
         transports::mock::Asserter,
     };
@@ -762,6 +798,28 @@ mod tests {
 
         assert_eq!(signed.hash(), TransactionHash::from_alloy_hash(expected_envelope.hash()));
         assert_ne!(signed.hash(), TransactionHash::from_alloy_hash(&network_payload_hash));
+    }
+
+    #[test]
+    fn gas_estimation_request_omits_typed_transaction_gas_limit() {
+        let from = EvmAddress::new(Address::repeat_byte(0x22));
+        let transaction = TypedTransaction::Eip1559(TxEip1559 {
+            to: TxKind::Call(Address::repeat_byte(0x11)),
+            value: U256::from(1),
+            input: Bytes::from_static(&[0x12, 0x34]),
+            gas_limit: 1_000_000,
+            nonce: 7,
+            max_priority_fee_per_gas: 1,
+            max_fee_per_gas: 2,
+            chain_id: 42161,
+            access_list: AccessList::default(),
+        });
+
+        let request = transaction_request_for_gas_estimation(&transaction, &from);
+
+        assert_eq!(request.from, Some(from.into_address()));
+        assert_eq!(request.gas, None);
+        assert_eq!(request.nonce, Some(7));
     }
 
     #[tokio::test]
