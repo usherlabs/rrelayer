@@ -1,0 +1,176 @@
+use axum::{body::Body, http::Request, Router};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
+    service::TowerToHyperService,
+};
+use std::{
+    fs::Metadata,
+    io,
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+use tokio::net::{UnixListener, UnixStream};
+use tower::ServiceExt;
+use tracing::warn;
+
+#[derive(Debug)]
+pub(crate) struct UnixSocketGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl UnixSocketGuard {
+    fn owns(&self, metadata: &Metadata) -> bool {
+        metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+    }
+}
+
+impl Drop for UnixSocketGuard {
+    fn drop(&mut self) {
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+
+        if self.owns(&metadata) {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                warn!(path = %self.path.display(), %error, "failed to remove Unix socket");
+            }
+        }
+    }
+}
+
+pub(crate) async fn bind(path: &Path) -> io::Result<(UnixListener, UnixSocketGuard)> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("refusing to replace non-socket path {}", path.display()),
+            ));
+        }
+
+        match UnixStream::connect(path).await {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("Unix socket {} is already accepting connections", path.display()),
+                ));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
+                std::fs::remove_file(path)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    let guard =
+        UnixSocketGuard { path: path.to_path_buf(), device: metadata.dev(), inode: metadata.ino() };
+
+    Ok((listener, guard))
+}
+
+pub(crate) async fn serve(listener: UnixListener, app: Router) -> io::Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let service = app
+            .clone()
+            .map_request(|request: Request<hyper_v1::body::Incoming>| request.map(Body::new));
+
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let service = TowerToHyperService::new(service);
+            if let Err(error) =
+                Builder::new(TokioExecutor::new()).serve_connection_with_upgrades(io, service).await
+            {
+                warn!(%error, "failed to serve Unix socket connection");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::get;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use uuid::Uuid;
+
+    fn socket_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rrelayer-{label}-{}.sock", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn refuses_to_replace_a_regular_file() {
+        let path = socket_path("regular-file");
+        std::fs::write(&path, "keep me").unwrap();
+
+        let error = bind(&path).await.unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_to_replace_an_active_socket() {
+        let path = socket_path("active");
+        let active = tokio::net::UnixListener::bind(&path).unwrap();
+
+        let error = bind(&path).await.unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_socket());
+        drop(active);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn replaces_a_stale_socket_and_applies_owner_only_permissions() {
+        let path = socket_path("stale");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+
+        let (_listener, guard) = bind(&path).await.unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn serves_http_over_the_unix_socket() {
+        let path = socket_path("http");
+        let (listener, guard) = bind(&path).await.unwrap();
+        let app = Router::new().route("/health", get(|| async { "healthy" }));
+        let server = tokio::spawn(serve(listener, app));
+        let mut stream = UnixStream::connect(&path).await.unwrap();
+
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.ends_with("healthy"), "{response}");
+
+        server.abort();
+        drop(guard);
+        assert!(!path.exists());
+    }
+}

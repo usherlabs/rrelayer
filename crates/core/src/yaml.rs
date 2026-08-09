@@ -5,7 +5,13 @@ use axum::http::HeaderName;
 use regex::{Captures, Regex};
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use std::{env, fmt, fs::File, io::Read, path::PathBuf, time::Duration};
+use std::{
+    env, fmt,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
 
 use crate::gas::{
@@ -572,11 +578,25 @@ pub struct ApiConfig {
     pub host: Option<String>,
     pub port: u32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub unix_socket_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub allowed_origins: Option<Vec<String>>,
     pub authentication_username: String,
     pub authentication_password: String,
     #[serde(default)]
     pub trust_forwarded_for: bool,
+}
+
+impl ApiConfig {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(path) = &self.unix_socket_path {
+            if !Path::new(path).is_absolute() {
+                return Err("api_config.unix_socket_path must be an absolute path".to_string());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1192,6 +1212,9 @@ pub enum ReadYamlError {
 
     #[error("Cron job yaml bad format: {0}")]
     CronJobYamlError(String),
+
+    #[error("API config yaml bad format: {0}")]
+    ApiConfigYamlError(String),
 }
 
 /// Reads and parses the RRelayer configuration YAML file.
@@ -1209,6 +1232,8 @@ pub fn read(file_path: &PathBuf, raw_yaml: bool) -> Result<SetupConfig, ReadYaml
     if config.networks.is_empty() {
         return Err(ReadYamlError::NoNetworksEnabled);
     }
+
+    config.api_config.validate().map_err(ReadYamlError::ApiConfigYamlError)?;
 
     for network in &config.networks {
         if network.provider_urls.is_empty() {
@@ -1277,10 +1302,17 @@ mod tests {
     use uuid::Uuid;
 
     fn read_policy(permission_fields: &str) -> Result<SetupConfig, ReadYamlError> {
+        read_policy_with_api_fields(permission_fields, "")
+    }
+
+    fn read_policy_with_api_fields(
+        permission_fields: &str,
+        api_fields: &str,
+    ) -> Result<SetupConfig, ReadYamlError> {
         let path =
             std::env::temp_dir().join(format!("rrelayer-request-policy-{}.yml", Uuid::new_v4()));
         let yaml = format!(
-            "name: test\nnetworks:\n- name: ethereum\n  chain_id: 1\n  provider_urls:\n  - http://127.0.0.1:8545\n  permissions:\n  - relayers: '*'\n    allowlist: []\n{permission_fields}api_config:\n  port: 8000\n  authentication_username: test\n  authentication_password: test\n"
+            "name: test\nnetworks:\n- name: ethereum\n  chain_id: 1\n  provider_urls:\n  - http://127.0.0.1:8545\n  permissions:\n  - relayers: '*'\n    allowlist: []\n{permission_fields}api_config:\n  port: 8000\n  authentication_username: test\n  authentication_password: test\n{api_fields}"
         );
         fs::write(&path, yaml).expect("write policy fixture");
         let result = read(&path, true);
@@ -1295,6 +1327,30 @@ mod tests {
         assert!(permission.ip_allowlist.is_none());
         assert!(permission.request_verification.is_none());
         assert!(!config.api_config.trust_forwarded_for);
+        assert!(config.api_config.unix_socket_path.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_an_absolute_unix_socket_path() {
+        let config = read_policy_with_api_fields(
+            "",
+            "  unix_socket_path: /run/rrelayer/admin-broker.sock\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.api_config.unix_socket_path.as_deref(),
+            Some("/run/rrelayer/admin-broker.sock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_relative_unix_socket_path() {
+        let result = read_policy_with_api_fields("", "  unix_socket_path: runtime/broker.sock\n");
+
+        assert!(matches!(result, Err(ReadYamlError::ApiConfigYamlError(_))));
     }
 
     #[test]

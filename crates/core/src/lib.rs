@@ -32,6 +32,8 @@ mod file;
 mod schema;
 pub mod signing;
 pub mod transaction;
+#[cfg(unix)]
+mod unix_socket;
 mod wallet;
 pub use wallet::{generate_seed_phrase, AwsKmsWalletManager, WalletError};
 mod background_tasks;

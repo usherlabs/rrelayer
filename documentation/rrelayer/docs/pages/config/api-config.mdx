@@ -1,6 +1,8 @@
 # API Config
 
-This holds the port the API will be exposed on alongside basic authentication details.
+This controls the API listener alongside its basic authentication details. TCP
+remains the default transport. Unix systems can instead expose the API through
+an owner-only Unix domain socket.
 
 ## Fields
 
@@ -24,6 +26,32 @@ name: first-rrelayer
 description: 'my first rrelayer'
 api_config:
   port: 3000
+```
+
+When `unix_socket_path` is set, `host` and `port` are retained for configuration
+compatibility but are not used to open a TCP listener.
+
+### unix_socket_path - optional, Unix only
+
+An absolute filesystem path for a Unix domain socket. This is useful when a
+co-located process is the only component that should be able to reach rrelayer.
+The socket is created with mode `0600` and removed on orderly server shutdown.
+
+rrelayer refuses to overwrite regular files or an active socket at this path.
+It replaces a socket only when the existing socket is stale and no longer
+accepts connections. Parent directory ownership and permissions remain the
+operator's responsibility; use an owner-only directory such as mode `0700`.
+
+Requests over this transport have no TCP client IP. Network permission rules
+that require an IP address therefore fail closed. Authentication and request
+verification policies continue to apply normally.
+
+```yaml [rrelayer.yaml]
+api_config:
+  port: 3000
+  unix_socket_path: '/run/rrelayer/admin-broker.sock'
+  authentication_username: "${RRELAYER_AUTH_USERNAME}"
+  authentication_password: "${RRELAYER_AUTH_PASSWORD}"
 ```
 
 ### authentication_username

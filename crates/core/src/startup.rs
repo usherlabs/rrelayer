@@ -46,7 +46,9 @@ use rustls::crypto::CryptoProvider;
 use std::collections::HashMap;
 use std::path::Path;
 use std::{
+    future::Future,
     net::SocketAddr,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -267,14 +269,41 @@ async fn start_api(
         .layer(middleware::from_fn(inject_basic_auth_status))
         .layer(middleware::from_fn(activity_logger))
         .layer(cors)
-        .with_state(app_state)
-        .into_make_service_with_connect_info::<SocketAddr>();
+        .with_state(app_state);
 
-    let address =
-        format!("{}:{}", api_config.host.unwrap_or("localhost".to_string()), api_config.port);
+    #[cfg(unix)]
+    let mut _unix_socket_guard = None;
+    let mut server: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
+        if let Some(unix_socket_path) = api_config.unix_socket_path {
+            #[cfg(unix)]
+            {
+                let path = Path::new(&unix_socket_path);
+                let (listener, guard) = crate::unix_socket::bind(path).await?;
+                _unix_socket_guard = Some(guard);
+                info!(path = %path.display(), "rrelayer is up on a Unix socket");
+                Box::pin(crate::unix_socket::serve(listener, app))
+            }
 
-    let listener = tokio::net::TcpListener::bind(&address).await?;
-    info!("rrelayer is up on http://{}", address);
+            #[cfg(not(unix))]
+            {
+                return Err(StartApiError::ApiStartupError(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!(
+                    "Unix socket transport is not supported on this platform: {unix_socket_path}"
+                ),
+                )));
+            }
+        } else {
+            let address = format!(
+                "{}:{}",
+                api_config.host.unwrap_or("localhost".to_string()),
+                api_config.port
+            );
+            let listener = tokio::net::TcpListener::bind(&address).await?;
+            info!("rrelayer is up on http://{}", address);
+            let service = app.into_make_service_with_connect_info::<SocketAddr>();
+            Box::pin(async move { axum::serve(listener, service).await })
+        };
 
     let shutdown_signal = async {
         let ctrl_c = async {
@@ -316,7 +345,7 @@ async fn start_api(
     };
 
     tokio::select! {
-        result = axum::serve(listener, app) => {
+        result = &mut server => {
             result.map_err(StartApiError::ApiStartupError)?;
         }
         _ = shutdown_signal => {

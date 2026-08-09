@@ -80,6 +80,7 @@ pub async fn handle_init(path: &Path) -> Result<(), InitError> {
         api_config: ApiConfig {
             host: None,
             port: 8000,
+            unix_socket_path: None,
             allowed_origins: None,
             authentication_username: "${RRELAYER_AUTH_USERNAME}".to_string(),
             authentication_password: "${RRELAYER_AUTH_PASSWORD}".to_string(),

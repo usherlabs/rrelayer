@@ -55,6 +55,8 @@ rust_decimal = { version = "1.35.0", features = ["db-tokio-postgres"] }
 google-secretmanager1 = "6.0"
 hyper = "0.14"
 hyper-rustls = "0.24"
+hyper-v1 = { package = "hyper", version = "1" }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 rustls = { version = "0.23.35", features = ["ring"]}
 hmac = "0.12"
 sha2 = "0.10"
