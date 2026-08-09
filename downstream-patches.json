@@ -239,7 +239,8 @@
       "rationale": "Allow the co-located Fiet Admin Gate to be the only process that can reach rrelayer without exposing a broker TCP port outside the TEE process boundary.",
       "status": "active",
       "source_commits": [
-        "ae8f1764ce13bc8f9dcbb77489fb7af3fa85d223"
+        "ae8f1764ce13bc8f9dcbb77489fb7af3fa85d223",
+        "ea4591bf1c3a547df83b0faadebd363bca01a0d3"
       ],
       "affected_paths": [
         "Cargo.lock",
