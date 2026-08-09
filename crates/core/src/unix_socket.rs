@@ -6,11 +6,17 @@ use hyper_util::{
 };
 use std::{
     fs::Metadata,
+    future::Future,
     io,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::Duration,
 };
-use tokio::net::{UnixListener, UnixStream};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::{broadcast, watch},
+    task::JoinSet,
+};
 use tower::ServiceExt;
 use tracing::warn;
 
@@ -52,23 +58,7 @@ pub(crate) async fn bind(path: &Path) -> io::Result<(UnixListener, UnixSocketGua
             ));
         }
 
-        match UnixStream::connect(path).await {
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    format!("Unix socket {} is already accepting connections", path.display()),
-                ));
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                ) =>
-            {
-                std::fs::remove_file(path)?;
-            }
-            Err(error) => return Err(error),
-        }
+        probe_existing_socket(path, UnixStream::connect(path), Duration::from_millis(250)).await?;
     }
 
     let listener = UnixListener::bind(path)?;
@@ -80,23 +70,90 @@ pub(crate) async fn bind(path: &Path) -> io::Result<(UnixListener, UnixSocketGua
     Ok((listener, guard))
 }
 
+async fn probe_existing_socket<F>(path: &Path, probe: F, timeout: Duration) -> io::Result<()>
+where
+    F: Future<Output = io::Result<UnixStream>>,
+{
+    match tokio::time::timeout(timeout, probe).await {
+        Err(_) | Ok(Ok(_)) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("Unix socket {} may still be accepting connections", path.display()),
+        )),
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            std::fs::remove_file(path)
+        }
+        Ok(Err(error)) => Err(error),
+    }
+}
+
 pub(crate) async fn serve(listener: UnixListener, app: Router) -> io::Result<()> {
+    serve_with_shutdown(listener, app, crate::shutdown::subscribe_to_shutdown()).await
+}
+
+async fn serve_with_shutdown(
+    listener: UnixListener,
+    app: Router,
+    mut shutdown: broadcast::Receiver<()>,
+) -> io::Result<()> {
+    let mut connections = JoinSet::new();
+    let (connection_shutdown, _) = watch::channel(false);
+
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = tokio::select! {
+            result = listener.accept() => result?.0,
+            _ = shutdown.recv() => break,
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(%error, "Unix socket connection task failed");
+                }
+                continue;
+            }
+        };
         let service = app
             .clone()
             .map_request(|request: Request<hyper_v1::body::Incoming>| request.map(Body::new));
+        let mut shutdown_connection = connection_shutdown.subscribe();
 
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let io = TokioIo::new(stream);
             let service = TowerToHyperService::new(service);
-            if let Err(error) =
-                Builder::new(TokioExecutor::new()).serve_connection_with_upgrades(io, service).await
-            {
-                warn!(%error, "failed to serve Unix socket connection");
+            let builder = Builder::new(TokioExecutor::new());
+            let connection = builder.serve_connection_with_upgrades(io, service);
+            tokio::pin!(connection);
+            let shutdown_requested = async {
+                let result = shutdown_connection.wait_for(|requested| *requested).await;
+                drop(result);
+            };
+
+            tokio::select! {
+                result = &mut connection => {
+                    if let Err(error) = result {
+                        warn!(%error, "failed to serve Unix socket connection");
+                    }
+                }
+                _ = shutdown_requested => {
+                    connection.as_mut().graceful_shutdown();
+                    if let Err(error) = connection.await {
+                        warn!(%error, "failed to gracefully close Unix socket connection");
+                    }
+                }
             }
         });
     }
+
+    let _ = connection_shutdown.send(true);
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result {
+            warn!(%error, "Unix socket connection task failed during shutdown");
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -172,5 +229,45 @@ mod tests {
         server.abort();
         drop(guard);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_activity_probe_preserves_the_existing_socket() {
+        let path = socket_path("probe-timeout");
+        let active = tokio::net::UnixListener::bind(&path).unwrap();
+
+        let error = probe_existing_socket(
+            &path,
+            std::future::pending(),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_socket());
+        drop(active);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_accepting_and_drains_connection_tasks() {
+        let path = socket_path("shutdown");
+        let (listener, guard) = bind(&path).await.unwrap();
+        let coordinator = std::sync::Arc::new(crate::shutdown::ShutdownCoordinator::new_for_test());
+        let shutdown = coordinator.subscribe();
+        let app = Router::new().route("/health", get(|| async { "healthy" }));
+        let server = tokio::spawn(serve_with_shutdown(listener, app, shutdown));
+        let stream = UnixStream::connect(&path).await.unwrap();
+
+        assert!(coordinator.request_shutdown(std::time::Duration::from_millis(20)).await);
+        tokio::time::timeout(std::time::Duration::from_millis(100), server)
+            .await
+            .expect("Unix server must stop after shutdown")
+            .unwrap()
+            .unwrap();
+
+        drop(stream);
+        drop(guard);
     }
 }

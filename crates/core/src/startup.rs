@@ -349,6 +349,7 @@ async fn start_api(
             result.map_err(StartApiError::ApiStartupError)?;
         }
         _ = shutdown_signal => {
+            drop(server);
             info!("Starting graceful shutdown...");
 
             let shutdown_successful = shutdown::request_graceful_shutdown(Duration::from_secs(30)).await;
