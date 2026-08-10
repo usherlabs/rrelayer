@@ -18,7 +18,9 @@ use tokio::{
     task::JoinSet,
 };
 use tower::ServiceExt;
-use tracing::warn;
+use tracing::{error, warn};
+
+const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct UnixSocketGuard {
@@ -92,13 +94,20 @@ where
 }
 
 pub(crate) async fn serve(listener: UnixListener, app: Router) -> io::Result<()> {
-    serve_with_shutdown(listener, app, crate::shutdown::subscribe_to_shutdown()).await
+    serve_with_shutdown(
+        listener,
+        app,
+        crate::shutdown::subscribe_to_shutdown(),
+        CONNECTION_DRAIN_TIMEOUT,
+    )
+    .await
 }
 
 async fn serve_with_shutdown(
     listener: UnixListener,
     app: Router,
     mut shutdown: broadcast::Receiver<()>,
+    drain_timeout: Duration,
 ) -> io::Result<()> {
     let mut connections = JoinSet::new();
     let (connection_shutdown, _) = watch::channel(false);
@@ -109,7 +118,7 @@ async fn serve_with_shutdown(
             _ = shutdown.recv() => break,
             completed = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = completed {
-                    warn!(%error, "Unix socket connection task failed");
+                    error!(%error, "Unix socket connection task failed");
                 }
                 continue;
             }
@@ -133,13 +142,13 @@ async fn serve_with_shutdown(
             tokio::select! {
                 result = &mut connection => {
                     if let Err(error) = result {
-                        warn!(%error, "failed to serve Unix socket connection");
+                        error!(%error, "failed to serve Unix socket connection");
                     }
                 }
                 _ = shutdown_requested => {
                     connection.as_mut().graceful_shutdown();
                     if let Err(error) = connection.await {
-                        warn!(%error, "failed to gracefully close Unix socket connection");
+                        error!(%error, "failed to gracefully close Unix socket connection");
                     }
                 }
             }
@@ -147,9 +156,28 @@ async fn serve_with_shutdown(
     }
 
     let _ = connection_shutdown.send(true);
-    while let Some(result) = connections.join_next().await {
-        if let Err(error) = result {
-            warn!(%error, "Unix socket connection task failed during shutdown");
+    let drained = tokio::time::timeout(drain_timeout, async {
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                error!(%error, "Unix socket connection task failed during shutdown");
+            }
+        }
+    })
+    .await;
+
+    if drained.is_err() {
+        error!(
+            ?drain_timeout,
+            remaining_connections = connections.len(),
+            "Unix socket connection drain deadline reached; aborting remaining tasks"
+        );
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    error!(%error, "Unix socket connection task failed during shutdown");
+                }
+            }
         }
     }
 
@@ -159,9 +187,18 @@ async fn serve_with_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::get;
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use axum::{
+        middleware,
+        routing::{get, post},
+    };
+    use std::{
+        os::unix::fs::{FileTypeExt, PermissionsExt},
+        sync::Arc,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        sync::Notify,
+    };
     use uuid::Uuid;
 
     fn socket_path(label: &str) -> std::path::PathBuf {
@@ -251,21 +288,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_stops_accepting_and_drains_connection_tasks() {
+    async fn shutdown_aborts_connection_tasks_after_drain_deadline() {
         let path = socket_path("shutdown");
         let (listener, guard) = bind(&path).await.unwrap();
         let coordinator = std::sync::Arc::new(crate::shutdown::ShutdownCoordinator::new_for_test());
         let shutdown = coordinator.subscribe();
-        let app = Router::new().route("/health", get(|| async { "healthy" }));
-        let server = tokio::spawn(serve_with_shutdown(listener, app, shutdown));
-        let stream = UnixStream::connect(&path).await.unwrap();
-
-        assert!(coordinator.request_shutdown(std::time::Duration::from_millis(20)).await);
-        tokio::time::timeout(std::time::Duration::from_millis(100), server)
+        let request_started = Arc::new(Notify::new());
+        let request_started_for_middleware = Arc::clone(&request_started);
+        let app = Router::new().route("/hold", post(|body: String| async move { body })).layer(
+            middleware::from_fn(move |request: Request<Body>, next: axum::middleware::Next| {
+                let request_started = Arc::clone(&request_started_for_middleware);
+                async move {
+                    request_started.notify_one();
+                    next.run(request).await
+                }
+            }),
+        );
+        let mut server = tokio::spawn(serve_with_shutdown(
+            listener,
+            app,
+            shutdown,
+            std::time::Duration::from_millis(20),
+        ));
+        let mut stream = UnixStream::connect(&path).await.unwrap();
+        stream
+            .write_all(
+                b"POST /hold HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16\r\n\r\nincomplete",
+            )
             .await
-            .expect("Unix server must stop after shutdown")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100), request_started.notified())
+            .await
+            .expect("Unix server must accept the incomplete request before shutdown");
+
+        let shutdown_started = tokio::time::Instant::now();
+        assert!(coordinator.request_shutdown(std::time::Duration::from_millis(20)).await);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), &mut server).await;
+        if result.is_err() {
+            server.abort();
+        }
+        result
+            .expect("Unix server must force incomplete requests closed after the drain deadline")
             .unwrap()
             .unwrap();
+        assert!(shutdown_started.elapsed() >= std::time::Duration::from_millis(20));
 
         drop(stream);
         drop(guard);
