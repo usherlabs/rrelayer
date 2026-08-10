@@ -231,6 +231,48 @@
         "cargo check -p rrelayer_cli --release --locked"
       ],
       "upstream": { "status": "not_applicable" }
+    },
+    {
+      "id": "unix-api-transport",
+      "title": "Owner-only Unix domain socket API transport",
+      "owner": "usherlabs",
+      "rationale": "Allow the co-located Fiet Admin Gate to reach rrelayer through an owner-only socket without exposing a broker TCP port outside the TEE process boundary.",
+      "status": "active",
+      "source_commits": [
+        "ae8f1764ce13bc8f9dcbb77489fb7af3fa85d223",
+        "ea4591bf1c3a547df83b0faadebd363bca01a0d3",
+        "87075215db66a89863bde9b795a7750ec71127b5",
+        "7e73c0c091db754d19b57917b446f3ecbe5cec4a"
+      ],
+      "affected_paths": [
+        "Cargo.lock",
+        "crates/cli/src/commands/new.rs",
+        "crates/core/Cargo.toml",
+        "crates/core/src/lib.rs",
+        "crates/core/src/startup.rs",
+        "crates/core/src/unix_socket.rs",
+        "crates/core/src/yaml.rs",
+        "documentation/rrelayer/docs/pages/changelog.mdx",
+        "documentation/rrelayer/docs/pages/config/api-config.mdx"
+      ],
+      "affected_behaviors": [
+        "select an absolute Unix socket path without changing default TCP configuration",
+        "create the socket with owner-only permissions and remove only the socket inode created by the running process",
+        "refuse active sockets and non-socket filesystem entries while replacing stale socket entries",
+        "serve HTTP over the Unix socket without fabricating TCP peer metadata"
+      ],
+      "canonical_baseline": "76a0c39d3418f1ca7351fdd6862f1906eeaa0ff6",
+      "requirement_ids": [
+        "rrelayer-api-transport:unix-domain-socket",
+        "rrelayer-api-transport:socket-lifecycle",
+        "rrelayer-api-transport:fail-closed-peer-policy"
+      ],
+      "regression_tests": [
+        "cargo test -p rrelayer_core --lib --locked unix_socket",
+        "cargo test -p rrelayer_core --lib --locked unix_socket_path",
+        "cargo test --exclude rust-sdk-playground --workspace --locked"
+      ],
+      "upstream": { "status": "planned" }
     }
   ]
 }
