@@ -240,7 +240,8 @@
       "status": "active",
       "source_commits": [
         "ae8f1764ce13bc8f9dcbb77489fb7af3fa85d223",
-        "ea4591bf1c3a547df83b0faadebd363bca01a0d3"
+        "ea4591bf1c3a547df83b0faadebd363bca01a0d3",
+        "87075215db66a89863bde9b795a7750ec71127b5"
       ],
       "affected_paths": [
         "Cargo.lock",
