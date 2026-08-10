@@ -236,12 +236,13 @@
       "id": "unix-api-transport",
       "title": "Owner-only Unix domain socket API transport",
       "owner": "usherlabs",
-      "rationale": "Allow the co-located Fiet Admin Gate to be the only process that can reach rrelayer without exposing a broker TCP port outside the TEE process boundary.",
+      "rationale": "Allow the co-located Fiet Admin Gate to reach rrelayer through an owner-only socket without exposing a broker TCP port outside the TEE process boundary.",
       "status": "active",
       "source_commits": [
         "ae8f1764ce13bc8f9dcbb77489fb7af3fa85d223",
         "ea4591bf1c3a547df83b0faadebd363bca01a0d3",
-        "87075215db66a89863bde9b795a7750ec71127b5"
+        "87075215db66a89863bde9b795a7750ec71127b5",
+        "7e73c0c091db754d19b57917b446f3ecbe5cec4a"
       ],
       "affected_paths": [
         "Cargo.lock",
