@@ -165,7 +165,7 @@ mod tests {
     use uuid::Uuid;
 
     fn socket_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rrelayer-{label}-{}.sock", Uuid::new_v4()))
+        std::path::Path::new("/tmp").join(format!("rrelayer-{label}-{}.sock", Uuid::new_v4()))
     }
 
     #[tokio::test]
