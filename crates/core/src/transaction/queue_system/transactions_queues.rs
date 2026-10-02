@@ -67,6 +67,10 @@ use crate::{
 const SAME_NONCE_BUMP_DIVISOR: u128 = 5;
 const MIN_SAME_NONCE_GAS_BUMP_WEI: u128 = 1_000_000_000;
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 trait NonceUpdateStore {
     async fn persist_nonce(
@@ -1126,6 +1130,10 @@ impl TransactionsQueues {
     /// dropping it would strand the nonce and wedge every transaction queued behind it.
     /// The DB row stays PENDING (with failed_reason set) so a crash before the no-op
     /// mines still rehydrates it; the no-op's receipt then resolves the status to FAILED.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     async fn close_out_pending_transaction_as_noop(
         &mut self,
         transactions_queue: &mut TransactionsQueue,
@@ -1191,6 +1199,10 @@ impl TransactionsQueues {
     /// Moves it into the inmempool queue under the mined hash so normal receipt
     /// resolution completes it - reassigning a fresh nonce here would broadcast the
     /// payload a second time.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     async fn resolve_pending_transaction_mined(
         &mut self,
         relayer_id: &RelayerId,
@@ -1259,6 +1271,10 @@ impl TransactionsQueues {
         ))
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn process_single_pending(
         &mut self,
         relayer_id: &RelayerId,
@@ -1725,6 +1741,10 @@ impl TransactionsQueues {
     }
 
     /// Processes a single in-mempool transaction for the specified relayer.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn process_single_inmempool(
         &mut self,
         relayer_id: &RelayerId,
@@ -2043,6 +2063,10 @@ impl TransactionsQueues {
     }
 
     /// Processes a single mined transaction for the specified relayer.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn process_single_mined(
         &mut self,
         relayer_id: &RelayerId,
