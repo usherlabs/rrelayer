@@ -2341,6 +2341,21 @@ mod tests {
     }
 
     #[test]
+    fn replacement_competitor_keeps_original_identity_and_successor_link() {
+        let mut original = transaction_with_nonce(7);
+        original.external_id = Some("original".to_string());
+        let mut competitor = original.clone();
+        competitor.id = TransactionId::new();
+        competitor.external_id = Some(format!("replace_{}", original.id));
+        let mut competition = super::super::types::CompetitiveTransaction::new(original.clone());
+        competition.add_competitor(competitor.clone(), CompetitionType::Replace);
+        assert_eq!(competition.original.id, original.id);
+        assert_eq!(competition.original.external_id, original.external_id);
+        assert_eq!(competition.original.cancelled_by_transaction_id, Some(competitor.id));
+        assert_eq!(competition.get_active_transaction().id, competitor.id);
+    }
+
+    #[test]
     fn cancellation_and_replacement_competitors_use_original_nonce() {
         let original = transaction_with_nonce(11);
 

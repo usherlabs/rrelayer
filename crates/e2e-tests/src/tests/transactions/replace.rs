@@ -129,6 +129,11 @@ impl TestRunner {
                         original_final.status == TransactionStatus::REPLACED,
                         "Original was not replaced"
                     );
+                    anyhow::ensure!(
+                        original_final.external_id == tx_request.external_id
+                            && original_final.cancelled_by_transaction_id == Some(replacement_id),
+                        "Original identity or successor link changed after mining"
+                    );
                 }
                 info!("[SUCCESS] Replacement identity verified: pending={pending}, repeated_id={repeat_external_id}");
             }

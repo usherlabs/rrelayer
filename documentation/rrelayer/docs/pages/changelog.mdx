@@ -13,6 +13,7 @@
 ### Bug fixes
 
 - fix: deduplicate transaction sends by external id per relayer and reject conflicting requests
+- fix: retain the original transaction's replacement successor link after the competitor is mined
 
 - Preserve accepted transaction submissions before a broadcast hash exists. Direct and random
   sends return HTTP 200 with `hash: null`; SDK callers poll by transaction ID and the CLI displays

@@ -281,7 +281,8 @@
       "rationale": "Make retries safe after an ambiguous HTTP submission response without admitting a second transaction or rebinding an existing request identity.",
       "status": "active",
       "source_commits": [
-        "f9bf07cffd4b61caa3331c6646fb5132704769c9"
+        "f9bf07cffd4b61caa3331c6646fb5132704769c9",
+        "e957428db974f565936ebcc200cda04b96a2e28e"
       ],
       "affected_paths": [
         "crates/core/src/postgres.rs",
@@ -302,6 +303,7 @@
         "resolve concurrent insert conflicts by reading the stored row without a second queue entry or retained nonce reservation",
         "preserve the original external ID across pending replacements and expose successors for in-mempool replacements",
         "reject external ID rebinding before either replacement phase and generate distinct in-mempool competitor IDs for omitted or repeated original IDs",
+        "retain the original successor link through in-memory competition and mined resolution",
         "look up external IDs within a relayer and reject ambiguous unscoped lookups",
         "refuse upgrades containing duplicate external IDs without rewriting transaction history"
       ],
