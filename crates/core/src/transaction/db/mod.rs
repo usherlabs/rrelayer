@@ -1,3 +1,4 @@
+pub(crate) mod admission;
 mod builders;
 mod read;
 mod write;

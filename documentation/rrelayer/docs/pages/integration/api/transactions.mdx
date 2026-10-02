@@ -10,6 +10,15 @@ All transaction endpoints require authentication. See [Authentication](/integrat
 
 Send a new transaction through a relayer.
 
+An `externalId` is unique within one relayer. Repeating the original `to`, `value`,
+`data` and requested `speed` returns HTTP 200 with the same transaction ID and its
+current hash (which may be null). Omitted speed means `FAST`. A changed request,
+or a pre-upgrade row without an original request digest, returns HTTP 409 and
+creates nothing. Comparison uses the original request, even after fee bumps,
+cancellation or replacement. Blob contents are not part of this identity contract.
+Retries require the same relayer; random-relayer sends do not provide cross-relayer
+deduplication.
+
 ### Endpoint
 
 ```
@@ -257,6 +266,41 @@ curl https://your-rrelayer.com/transactions/hash/0xabcdef123456789abcdef12345678
 ## Get Transaction by External ID
 
 Get transaction details by custom external ID.
+
+Prefer the relayer-scoped route:
+
+```
+GET /transactions/relayers/{relayer_id}/external/{external_id}
+```
+
+It returns one transaction or HTTP 404. The unscoped route below keeps its null
+response for missing IDs, but returns HTTP 409 if multiple relayers use the ID.
+
+### Database upgrade
+
+The forward migration creates a unique index on `(relayer_id, external_id)` for
+non-null IDs. It refuses to start when older data contains duplicates; it never
+chooses a winner or deletes a transaction. Before upgrading, stop admission and
+inspect duplicate groups:
+
+```sql
+SELECT relayer_id, external_id, array_agg(id ORDER BY queued_at) AS transaction_ids
+FROM relayer.transaction
+WHERE external_id IS NOT NULL
+GROUP BY relayer_id, external_id
+HAVING count(*) > 1;
+```
+
+Reconcile each transaction's broadcast and chain status, preserve its audit history,
+and explicitly assign distinct correlation IDs to the duplicate records before
+restarting. Do not resubmit these transactions. Existing rows have no immutable
+request digest and return HTTP 409 on retry; look them up instead. Downgrading
+keeps the unique index, but old binaries do not implement idempotent admission.
+
+Pending replacements keep the original external ID; a different supplied ID is
+HTTP 409. In-mempool replacements use a distinct supplied ID or a generated ID.
+The original row retains its ID and exposes `cancelledByTransactionId` so callers
+can follow the successor.
 
 ### Endpoint
 

@@ -209,20 +209,29 @@ impl PostgresClient {
         &self,
         external_id: &str,
     ) -> Result<Option<Transaction>, PostgresError> {
-        let row = self
-            .query_one_or_none(
-                "
-                    SELECT *
-                    FROM relayer.transaction
-                    WHERE external_id = $1;
-                ",
+        let rows = self
+            .query(
+                "SELECT * FROM relayer.transaction WHERE external_id = $1 LIMIT 2",
                 &[&external_id],
             )
             .await?;
-
-        match row {
-            None => Ok(None),
-            Some(row) => Ok(Some(build_transaction_from_transaction_view(&row))),
+        if rows.len() > 1 {
+            return Err(PostgresError::AmbiguousExternalId);
         }
+        Ok(rows.first().map(build_transaction_from_transaction_view))
+    }
+
+    pub async fn get_transaction_by_external_id_for_relayer(
+        &self,
+        relayer_id: &RelayerId,
+        external_id: &str,
+    ) -> Result<Option<Transaction>, PostgresError> {
+        let row = self
+            .query_one_or_none(
+                "SELECT * FROM relayer.transaction WHERE relayer_id = $1 AND external_id = $2",
+                &[relayer_id, &external_id],
+            )
+            .await?;
+        Ok(row.as_ref().map(build_transaction_from_transaction_view))
     }
 }

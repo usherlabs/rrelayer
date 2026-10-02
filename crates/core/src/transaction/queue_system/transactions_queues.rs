@@ -307,7 +307,7 @@ impl TransactionsQueues {
             current_transaction.blobs = None;
         }
         current_transaction.gas_limit = None;
-        current_transaction.external_id = replace_with.external_id.clone();
+        // The admission identity must survive live payload changes.
     }
 
     fn competitor_nonce(original_transaction: &Transaction) -> TransactionNonce {
@@ -415,6 +415,22 @@ impl TransactionsQueues {
         relayer_id: &RelayerId,
         transaction_to_send: &TransactionToSend,
     ) -> Result<Transaction, AddTransactionError> {
+        if let Some(stored) = self
+            .db
+            .find_admitted_transaction(
+                relayer_id,
+                transaction_to_send.external_id.as_deref(),
+                &crate::transaction::db::admission::request_digest(
+                    transaction_to_send.to,
+                    transaction_to_send.value,
+                    &transaction_to_send.data,
+                    &transaction_to_send.speed,
+                ),
+            )
+            .await?
+        {
+            return Ok(stored);
+        }
         let expires_at = self.expires_at();
 
         let queue_arc = self
@@ -493,7 +509,8 @@ impl TransactionsQueues {
             Err(err) => {
                 let failed_transaction =
                     Transaction { status: TransactionStatus::FAILED, ..transaction };
-                self.db
+                let save_result = self
+                    .db
                     .transaction_failed_on_send(
                         relayer_id,
                         &failed_transaction,
@@ -501,8 +518,13 @@ impl TransactionsQueues {
                             "Failed to send transaction as always failing on gas estimation: {err}"
                         ),
                     )
-                    .await
-                    .map_err(AddTransactionError::CouldNotSaveTransactionDb)?;
+                    .await;
+                if let Err(error) = save_result {
+                    return self
+                        .db
+                        .resolve_admission_insert_error(relayer_id, &failed_transaction, error)
+                        .await;
+                }
 
                 self.invalidate_transaction_cache(&transaction.id).await;
                 return Err(err);
@@ -513,9 +535,16 @@ impl TransactionsQueues {
         transaction.nonce = assigned_nonce;
         transaction.gas_limit = Some(estimated_gas_limit);
 
-        if let Err(error) = self.db.save_transaction(relayer_id, &transaction).await {
-            transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
-            return Err(AddTransactionError::CouldNotSaveTransactionDb(error));
+        match self.db.save_admitted_transaction(relayer_id, &transaction).await {
+            Ok(stored) if stored.id != transaction.id => {
+                transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
+                return Ok(stored);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
+                return Err(error);
+            }
         }
 
         transactions_queue.add_pending_transaction(transaction.clone()).await;
@@ -797,6 +826,13 @@ impl TransactionsQueues {
 
                 match result.type_name {
                     EditableTransactionType::Pending => {
+                        if replace_with
+                            .external_id
+                            .as_ref()
+                            .is_some_and(|id| Some(id) != result.transaction.external_id.as_ref())
+                        {
+                            return Err(ReplaceTransactionError::ExternalIdConflict);
+                        }
                         let original_transaction = result.transaction.clone();
                         Self::transaction_replace(&mut result.transaction, replace_with);
 
@@ -832,6 +868,13 @@ impl TransactionsQueues {
                         })
                     }
                     EditableTransactionType::Inmempool => {
+                        if replace_with
+                            .external_id
+                            .as_ref()
+                            .is_some_and(|id| Some(id) == result.transaction.external_id.as_ref())
+                        {
+                            return Err(ReplaceTransactionError::ExternalIdConflict);
+                        }
                         let replace_transaction_id = TransactionId::new();
                         let expires_at = self.expires_at();
 
@@ -2221,6 +2264,7 @@ mod tests {
     fn pending_replacement_preserves_transaction_identity_and_original_nonce() {
         let mut transaction = transaction_with_nonce(7);
         let original_id = transaction.id;
+        transaction.external_id = Some("original".to_string());
         let replacement = RelayTransactionRequest {
             to: EvmAddress::zero(),
             value: TransactionValue::new(alloy::primitives::U256::from(42)),
@@ -2234,7 +2278,7 @@ mod tests {
 
         assert_eq!(transaction.id, original_id);
         assert_eq!(transaction.nonce, TransactionNonce::new(7));
-        assert_eq!(transaction.external_id.as_deref(), Some("replacement"));
+        assert_eq!(transaction.external_id.as_deref(), Some("original"));
     }
 
     #[test]

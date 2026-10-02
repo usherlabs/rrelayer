@@ -27,6 +27,8 @@ async fn example() -> Result<()> {
         )
         .await?;
     println!("{:?}", transaction);
+    let by_external_id = relayer_client.transaction().get_by_external_id("order_12345").await?;
+    println!("{:?}", by_external_id);
 
     Ok(())
 }

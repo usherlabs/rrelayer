@@ -12,6 +12,8 @@
 
 ### Bug fixes
 
+- fix: deduplicate transaction sends by external id per relayer and reject conflicting requests
+
 - Preserve accepted transaction submissions before a broadcast hash exists. Direct and random
   sends return HTTP 200 with `hash: null`; SDK callers poll by transaction ID and the CLI displays
   `<pending>` instead of treating acceptance as a server error.

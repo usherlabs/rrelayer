@@ -34,6 +34,9 @@ pub fn conflict(message: String) -> HttpError {
 
 impl From<PostgresError> for HttpError {
     fn from(error: PostgresError) -> HttpError {
+        if matches!(error, PostgresError::AmbiguousExternalId) {
+            return conflict(error.to_string());
+        }
         error!("Postgres error occurred - {:?}", error);
         internal_server_error(Some(error.to_string()))
     }
