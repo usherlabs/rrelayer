@@ -9,6 +9,10 @@ use crate::{
 
 use super::transactions_queue::TransactionsQueue;
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 pub(super) trait TransactionExistenceChecker {
     async fn transaction_exists(

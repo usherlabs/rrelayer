@@ -38,6 +38,16 @@ impl TransactionApi {
         self.client.get_or_none(&format!("transactions/external/{}", external_id)).await
     }
 
+    pub async fn get_by_external_id_for_relayer(
+        &self,
+        relayer_id: &RelayerId,
+        external_id: &str,
+    ) -> ApiResult<Option<Transaction>> {
+        self.client
+            .get_or_none(&format!("transactions/relayers/{}/external/{}", relayer_id, external_id))
+            .await
+    }
+
     pub async fn get_all(
         &self,
         relayer_id: &RelayerId,

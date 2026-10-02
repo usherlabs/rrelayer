@@ -2,7 +2,7 @@ mod transactions_queue;
 mod transactions_queues;
 pub use transactions_queues::TransactionsQueues;
 
-mod types;
+pub(crate) mod types;
 pub use types::{ReplaceTransactionResult, TransactionToSend, TransactionsQueueSetup};
 
 mod attempts;

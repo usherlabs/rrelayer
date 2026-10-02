@@ -36,6 +36,7 @@ impl CompetitiveTransaction {
 
     /// Add a competitive transaction (cancel or replace)
     pub fn add_competitor(&mut self, competitor: Transaction, competition_type: CompetitionType) {
+        self.original.cancelled_by_transaction_id = Some(competitor.id);
         self.competitive = Some((competitor, competition_type));
     }
 

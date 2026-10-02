@@ -378,7 +378,7 @@ impl<'a> AdminRelayerClientTransactionApi<'a> {
     }
 
     pub async fn get_by_external_id(&self, external_id: &str) -> ApiResult<Option<Transaction>> {
-        self.transaction_api.get_by_external_id(external_id).await
+        self.transaction_api.get_by_external_id_for_relayer(self.relayer_id, external_id).await
     }
 
     pub async fn get_status(
@@ -593,7 +593,7 @@ impl<'a> RelayerClientTransactionApi<'a> {
     }
 
     pub async fn get_by_external_id(&self, external_id: &str) -> ApiResult<Option<Transaction>> {
-        self.transaction_api.get_by_external_id(external_id).await
+        self.transaction_api.get_by_external_id_for_relayer(self.relayer_id, external_id).await
     }
 
     pub async fn get_status(

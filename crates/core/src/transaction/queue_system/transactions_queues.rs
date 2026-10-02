@@ -67,6 +67,10 @@ use crate::{
 const SAME_NONCE_BUMP_DIVISOR: u128 = 5;
 const MIN_SAME_NONCE_GAS_BUMP_WEI: u128 = 1_000_000_000;
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 trait NonceUpdateStore {
     async fn persist_nonce(
@@ -307,7 +311,21 @@ impl TransactionsQueues {
             current_transaction.blobs = None;
         }
         current_transaction.gas_limit = None;
-        current_transaction.external_id = replace_with.external_id.clone();
+        // The admission identity must survive live payload changes.
+    }
+
+    fn replacement_external_id(
+        original: &Transaction,
+        requested: Option<&str>,
+        phase: &EditableTransactionType,
+    ) -> Result<Option<String>, ReplaceTransactionError> {
+        if requested.is_some_and(|id| Some(id) != original.external_id.as_deref()) {
+            return Err(ReplaceTransactionError::ExternalIdConflict);
+        }
+        Ok(match phase {
+            EditableTransactionType::Pending => original.external_id.clone(),
+            EditableTransactionType::Inmempool => Some(format!("replace_{}", original.id)),
+        })
     }
 
     fn competitor_nonce(original_transaction: &Transaction) -> TransactionNonce {
@@ -415,6 +433,22 @@ impl TransactionsQueues {
         relayer_id: &RelayerId,
         transaction_to_send: &TransactionToSend,
     ) -> Result<Transaction, AddTransactionError> {
+        if let Some(stored) = self
+            .db
+            .find_admitted_transaction(
+                relayer_id,
+                transaction_to_send.external_id.as_deref(),
+                &crate::transaction::db::admission::request_digest(
+                    transaction_to_send.to,
+                    transaction_to_send.value,
+                    &transaction_to_send.data,
+                    &transaction_to_send.speed,
+                ),
+            )
+            .await?
+        {
+            return Ok(stored);
+        }
         let expires_at = self.expires_at();
 
         let queue_arc = self
@@ -493,7 +527,8 @@ impl TransactionsQueues {
             Err(err) => {
                 let failed_transaction =
                     Transaction { status: TransactionStatus::FAILED, ..transaction };
-                self.db
+                let save_result = self
+                    .db
                     .transaction_failed_on_send(
                         relayer_id,
                         &failed_transaction,
@@ -501,8 +536,13 @@ impl TransactionsQueues {
                             "Failed to send transaction as always failing on gas estimation: {err}"
                         ),
                     )
-                    .await
-                    .map_err(AddTransactionError::CouldNotSaveTransactionDb)?;
+                    .await;
+                if let Err(error) = save_result {
+                    return self
+                        .db
+                        .resolve_admission_insert_error(relayer_id, &failed_transaction, error)
+                        .await;
+                }
 
                 self.invalidate_transaction_cache(&transaction.id).await;
                 return Err(err);
@@ -513,9 +553,16 @@ impl TransactionsQueues {
         transaction.nonce = assigned_nonce;
         transaction.gas_limit = Some(estimated_gas_limit);
 
-        if let Err(error) = self.db.save_transaction(relayer_id, &transaction).await {
-            transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
-            return Err(AddTransactionError::CouldNotSaveTransactionDb(error));
+        match self.db.save_admitted_transaction(relayer_id, &transaction).await {
+            Ok(stored) if stored.id != transaction.id => {
+                transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
+                return Ok(stored);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                transactions_queue.nonce_manager.release_unbroadcast_nonce(assigned_nonce).await;
+                return Err(error);
+            }
         }
 
         transactions_queue.add_pending_transaction(transaction.clone()).await;
@@ -795,6 +842,11 @@ impl TransactionsQueues {
                     ReplaceTransactionError::RelayerIsPaused(transaction.relayer_id)
                 })?;
 
+                let replacement_external_id = Self::replacement_external_id(
+                    &result.transaction,
+                    replace_with.external_id.as_deref(),
+                    &result.type_name,
+                )?;
                 match result.type_name {
                     EditableTransactionType::Pending => {
                         let original_transaction = result.transaction.clone();
@@ -877,10 +929,7 @@ impl TransactionsQueues {
                             is_noop: false,
                             sent_with_gas: None,
                             sent_with_blob_gas: None,
-                            external_id: replace_with
-                                .external_id
-                                .clone()
-                                .or_else(|| Some(format!("replace_{}", transaction.id))),
+                            external_id: replacement_external_id,
                             cancelled_by_transaction_id: None,
                             failed_reason: None,
                         };
@@ -1083,6 +1132,10 @@ impl TransactionsQueues {
     /// dropping it would strand the nonce and wedge every transaction queued behind it.
     /// The DB row stays PENDING (with failed_reason set) so a crash before the no-op
     /// mines still rehydrates it; the no-op's receipt then resolves the status to FAILED.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     async fn close_out_pending_transaction_as_noop(
         &mut self,
         transactions_queue: &mut TransactionsQueue,
@@ -1148,6 +1201,10 @@ impl TransactionsQueues {
     /// Moves it into the inmempool queue under the mined hash so normal receipt
     /// resolution completes it - reassigning a fresh nonce here would broadcast the
     /// payload a second time.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     async fn resolve_pending_transaction_mined(
         &mut self,
         relayer_id: &RelayerId,
@@ -1216,6 +1273,10 @@ impl TransactionsQueues {
         ))
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn process_single_pending(
         &mut self,
         relayer_id: &RelayerId,
@@ -1682,6 +1743,10 @@ impl TransactionsQueues {
     }
 
     /// Processes a single in-mempool transaction for the specified relayer.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn process_single_inmempool(
         &mut self,
         relayer_id: &RelayerId,
@@ -2000,6 +2065,10 @@ impl TransactionsQueues {
     }
 
     /// Processes a single mined transaction for the specified relayer.
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn process_single_mined(
         &mut self,
         relayer_id: &RelayerId,
@@ -2221,12 +2290,13 @@ mod tests {
     fn pending_replacement_preserves_transaction_identity_and_original_nonce() {
         let mut transaction = transaction_with_nonce(7);
         let original_id = transaction.id;
+        transaction.external_id = Some("original".to_string());
         let replacement = RelayTransactionRequest {
             to: EvmAddress::zero(),
             value: TransactionValue::new(alloy::primitives::U256::from(42)),
             data: TransactionData::empty(),
             speed: Some(TransactionSpeed::SUPER),
-            external_id: Some("replacement".to_string()),
+            external_id: Some("original".to_string()),
             blobs: None,
         };
 
@@ -2234,7 +2304,55 @@ mod tests {
 
         assert_eq!(transaction.id, original_id);
         assert_eq!(transaction.nonce, TransactionNonce::new(7));
-        assert_eq!(transaction.external_id.as_deref(), Some("replacement"));
+        assert_eq!(transaction.external_id.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn replacement_external_id_preserves_pending_identity_and_separates_competitors() {
+        let mut original = transaction_with_nonce(7);
+        original.external_id = Some("original".to_string());
+        let before = serde_json::to_value(&original).unwrap();
+        for phase in [EditableTransactionType::Pending, EditableTransactionType::Inmempool] {
+            for requested in [None, Some("original")] {
+                let id = TransactionsQueues::replacement_external_id(&original, requested, &phase)
+                    .unwrap();
+                match phase {
+                    EditableTransactionType::Pending => assert_eq!(id, original.external_id),
+                    EditableTransactionType::Inmempool => {
+                        assert_eq!(id, Some(format!("replace_{}", original.id)));
+                        assert_ne!(id, original.external_id);
+                    }
+                }
+            }
+            assert!(matches!(
+                TransactionsQueues::replacement_external_id(&original, Some("different"), &phase),
+                Err(ReplaceTransactionError::ExternalIdConflict)
+            ));
+            assert_eq!(serde_json::to_value(&original).unwrap(), before);
+        }
+        original.external_id = None;
+        for phase in [EditableTransactionType::Pending, EditableTransactionType::Inmempool] {
+            assert!(matches!(
+                TransactionsQueues::replacement_external_id(&original, Some("new"), &phase),
+                Err(ReplaceTransactionError::ExternalIdConflict)
+            ));
+            assert!(TransactionsQueues::replacement_external_id(&original, None, &phase).is_ok());
+        }
+    }
+
+    #[test]
+    fn replacement_competitor_keeps_original_identity_and_successor_link() {
+        let mut original = transaction_with_nonce(7);
+        original.external_id = Some("original".to_string());
+        let mut competitor = original.clone();
+        competitor.id = TransactionId::new();
+        competitor.external_id = Some(format!("replace_{}", original.id));
+        let mut competition = super::super::types::CompetitiveTransaction::new(original.clone());
+        competition.add_competitor(competitor.clone(), CompetitionType::Replace);
+        assert_eq!(competition.original.id, original.id);
+        assert_eq!(competition.original.external_id, original.external_id);
+        assert_eq!(competition.original.cancelled_by_transaction_id, Some(competitor.id));
+        assert_eq!(competition.get_active_transaction().id, competitor.id);
     }
 
     #[test]

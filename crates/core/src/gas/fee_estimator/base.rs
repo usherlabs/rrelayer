@@ -101,6 +101,10 @@ impl From<reqwest::Error> for GasEstimatorError {
     }
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 pub trait BaseGasFeeEstimator {
     async fn get_gas_prices(

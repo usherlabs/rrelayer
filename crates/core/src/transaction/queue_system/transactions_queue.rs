@@ -128,6 +128,10 @@ fn sort_pending_transactions(transactions: &mut VecDeque<Transaction>) {
     transactions.make_contiguous().sort_by_key(|transaction| transaction.nonce.into_inner());
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 trait BroadcastAttemptStore {
     async fn persist_attempt(
@@ -181,6 +185,10 @@ impl BroadcastAttemptStore for PostgresClient {
     }
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 trait SignedTransactionBroadcaster {
     async fn broadcast(
@@ -440,6 +448,10 @@ impl TransactionsQueue {
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn move_pending_to_inmempool(
         &mut self,
         transaction: &Transaction,
@@ -672,6 +684,10 @@ impl TransactionsQueue {
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Preserve typed queue errors and their transaction evidence without changing the public API"
+    )]
     pub async fn move_inmempool_to_mining(
         &mut self,
         id: &TransactionId,

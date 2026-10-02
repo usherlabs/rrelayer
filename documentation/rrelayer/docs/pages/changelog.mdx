@@ -12,6 +12,9 @@
 
 ### Bug fixes
 
+- fix: deduplicate transaction sends by external id per relayer and reject conflicting requests
+- fix: retain the original transaction's replacement successor link after the competitor is mined
+
 - Preserve accepted transaction submissions before a broadcast hash exists. Direct and random
   sends return HTTP 200 with `hash: null`; SDK callers poll by transaction ID and the CLI displays
   `<pending>` instead of treating acceptance as a server error.
@@ -27,6 +30,13 @@
 ---
 
 ### Breaking changes
+
+- Transaction replacement rejects a supplied `externalId` that differs from the original
+  with HTTP 409, whether the original is pending or in the mempool. Omit `externalId`
+  or repeat the original ID. Pending replacement updates the original row and keeps
+  its external ID. In-mempool replacement creates a competitor with
+  `replace_<original transaction UUID>`; the original keeps its external ID and
+  links to the replacement transaction.
 
 ---
 

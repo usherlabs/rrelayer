@@ -7,7 +7,9 @@ use super::{
     SendTransactionGasPriceError, TransactionQueueSendTransactionError, TransactionSentWithRelayer,
 };
 use crate::common_types::EvmAddress;
-use crate::shared::{bad_request, forbidden, internal_server_error, not_found, HttpError};
+use crate::shared::{
+    bad_request, conflict, forbidden, internal_server_error, not_found, HttpError,
+};
 use crate::transaction::types::TransactionConversionError;
 use crate::{
     postgres::PostgresError,
@@ -18,6 +20,9 @@ use crate::{
 
 #[derive(Error, Debug)]
 pub enum ReplaceTransactionError {
+    #[error("External ID cannot be rebound during replacement")]
+    ExternalIdConflict,
+
     #[error("Send transaction error: {0}")]
     SendTransactionError(#[from] TransactionQueueSendTransactionError),
 
@@ -39,6 +44,10 @@ pub enum ReplaceTransactionError {
 
 impl From<ReplaceTransactionError> for HttpError {
     fn from(value: ReplaceTransactionError) -> Self {
+        if matches!(value, ReplaceTransactionError::ExternalIdConflict) {
+            return conflict(value.to_string());
+        }
+
         if matches!(value, ReplaceTransactionError::TransactionNotFound(_)) {
             return bad_request(value.to_string());
         }
@@ -53,6 +62,9 @@ impl From<ReplaceTransactionError> for HttpError {
 
 #[derive(Error, Debug)]
 pub enum AddTransactionError {
+    #[error("External ID {0} is already bound to a different or unverifiable original transaction request")]
+    ExternalIdConflict(String),
+
     #[error("Transaction could not be saved in DB: {0}")]
     CouldNotSaveTransactionDb(PostgresError),
 
@@ -86,6 +98,10 @@ pub enum AddTransactionError {
 
 impl From<AddTransactionError> for HttpError {
     fn from(value: AddTransactionError) -> Self {
+        if matches!(value, AddTransactionError::ExternalIdConflict(_)) {
+            return conflict(value.to_string());
+        }
+
         if matches!(value, AddTransactionError::RelayerIsPaused(_)) {
             return forbidden(value.to_string());
         }
