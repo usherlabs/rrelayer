@@ -30,6 +30,13 @@
 
 ### Breaking changes
 
+- Transaction replacement rejects a supplied `externalId` that differs from the original
+  with HTTP 409, whether the original is pending or in the mempool. Omit `externalId`
+  or repeat the original ID. Pending replacement updates the original row and keeps
+  its external ID. In-mempool replacement creates a competitor with
+  `replace_<original transaction UUID>`; the original keeps its external ID and
+  links to the replacement transaction.
+
 ---
 
 ## Releases

@@ -314,6 +314,20 @@ impl TransactionsQueues {
         // The admission identity must survive live payload changes.
     }
 
+    fn replacement_external_id(
+        original: &Transaction,
+        requested: Option<&str>,
+        phase: &EditableTransactionType,
+    ) -> Result<Option<String>, ReplaceTransactionError> {
+        if requested.is_some_and(|id| Some(id) != original.external_id.as_deref()) {
+            return Err(ReplaceTransactionError::ExternalIdConflict);
+        }
+        Ok(match phase {
+            EditableTransactionType::Pending => original.external_id.clone(),
+            EditableTransactionType::Inmempool => Some(format!("replace_{}", original.id)),
+        })
+    }
+
     fn competitor_nonce(original_transaction: &Transaction) -> TransactionNonce {
         original_transaction.nonce
     }
@@ -828,15 +842,13 @@ impl TransactionsQueues {
                     ReplaceTransactionError::RelayerIsPaused(transaction.relayer_id)
                 })?;
 
+                let replacement_external_id = Self::replacement_external_id(
+                    &result.transaction,
+                    replace_with.external_id.as_deref(),
+                    &result.type_name,
+                )?;
                 match result.type_name {
                     EditableTransactionType::Pending => {
-                        if replace_with
-                            .external_id
-                            .as_ref()
-                            .is_some_and(|id| Some(id) != result.transaction.external_id.as_ref())
-                        {
-                            return Err(ReplaceTransactionError::ExternalIdConflict);
-                        }
                         let original_transaction = result.transaction.clone();
                         Self::transaction_replace(&mut result.transaction, replace_with);
 
@@ -872,13 +884,6 @@ impl TransactionsQueues {
                         })
                     }
                     EditableTransactionType::Inmempool => {
-                        if replace_with
-                            .external_id
-                            .as_ref()
-                            .is_some_and(|id| Some(id) == result.transaction.external_id.as_ref())
-                        {
-                            return Err(ReplaceTransactionError::ExternalIdConflict);
-                        }
                         let replace_transaction_id = TransactionId::new();
                         let expires_at = self.expires_at();
 
@@ -924,10 +929,7 @@ impl TransactionsQueues {
                             is_noop: false,
                             sent_with_gas: None,
                             sent_with_blob_gas: None,
-                            external_id: replace_with
-                                .external_id
-                                .clone()
-                                .or_else(|| Some(format!("replace_{}", transaction.id))),
+                            external_id: replacement_external_id,
                             cancelled_by_transaction_id: None,
                             failed_reason: None,
                         };
@@ -2294,7 +2296,7 @@ mod tests {
             value: TransactionValue::new(alloy::primitives::U256::from(42)),
             data: TransactionData::empty(),
             speed: Some(TransactionSpeed::SUPER),
-            external_id: Some("replacement".to_string()),
+            external_id: Some("original".to_string()),
             blobs: None,
         };
 
@@ -2303,6 +2305,39 @@ mod tests {
         assert_eq!(transaction.id, original_id);
         assert_eq!(transaction.nonce, TransactionNonce::new(7));
         assert_eq!(transaction.external_id.as_deref(), Some("original"));
+    }
+
+    #[test]
+    fn replacement_external_id_preserves_pending_identity_and_separates_competitors() {
+        let mut original = transaction_with_nonce(7);
+        original.external_id = Some("original".to_string());
+        let before = serde_json::to_value(&original).unwrap();
+        for phase in [EditableTransactionType::Pending, EditableTransactionType::Inmempool] {
+            for requested in [None, Some("original")] {
+                let id = TransactionsQueues::replacement_external_id(&original, requested, &phase)
+                    .unwrap();
+                match phase {
+                    EditableTransactionType::Pending => assert_eq!(id, original.external_id),
+                    EditableTransactionType::Inmempool => {
+                        assert_eq!(id, Some(format!("replace_{}", original.id)));
+                        assert_ne!(id, original.external_id);
+                    }
+                }
+            }
+            assert!(matches!(
+                TransactionsQueues::replacement_external_id(&original, Some("different"), &phase),
+                Err(ReplaceTransactionError::ExternalIdConflict)
+            ));
+            assert_eq!(serde_json::to_value(&original).unwrap(), before);
+        }
+        original.external_id = None;
+        for phase in [EditableTransactionType::Pending, EditableTransactionType::Inmempool] {
+            assert!(matches!(
+                TransactionsQueues::replacement_external_id(&original, Some("new"), &phase),
+                Err(ReplaceTransactionError::ExternalIdConflict)
+            ));
+            assert!(TransactionsQueues::replacement_external_id(&original, None, &phase).is_ok());
+        }
     }
 
     #[test]

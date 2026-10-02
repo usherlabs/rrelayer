@@ -291,6 +291,7 @@
         "crates/sdk/src",
         "sdk/typescript/src",
         "playground/rust-sdk-playground/src/transaction/get_transaction/api_key.rs",
+        "crates/e2e-tests/src/tests/transactions/replace.rs",
         "documentation/rrelayer/docs/pages/changelog.mdx",
         "documentation/rrelayer/docs/pages/integration"
       ],
@@ -300,6 +301,7 @@
         "return the stored transaction ID and current hash for identical retries and HTTP 409 for conflicting or unverifiable requests",
         "resolve concurrent insert conflicts by reading the stored row without a second queue entry or retained nonce reservation",
         "preserve the original external ID across pending replacements and expose successors for in-mempool replacements",
+        "reject external ID rebinding before either replacement phase and generate distinct in-mempool competitor IDs for omitted or repeated original IDs",
         "look up external IDs within a relayer and reject ambiguous unscoped lookups",
         "refuse upgrades containing duplicate external IDs without rewriting transaction history"
       ],
@@ -312,7 +314,9 @@
       ],
       "regression_tests": [
         "cargo nextest run -p rrelayer_core --locked",
-        "cargo nextest run -p rrelayer_core --locked --run-ignored only -j 1 -E \"test(external_id)\""
+        "cargo nextest run -p rrelayer_core --locked --run-ignored only -j 1 -E \"test(external_id)\"",
+        "cargo test -p rrelayer_core --lib --locked replacement_external_id",
+        "RRELAYER_PROVIDERS=raw RRELAYER_TEST_FILTER=transaction_replace cargo run --locked --bin e2e-runner"
       ],
       "upstream": {
         "status": "planned"

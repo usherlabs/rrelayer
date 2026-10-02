@@ -297,8 +297,10 @@ restarting. Do not resubmit these transactions. Existing rows have no immutable
 request digest and return HTTP 409 on retry; look them up instead. Downgrading
 keeps the unique index, but old binaries do not implement idempotent admission.
 
-Pending replacements keep the original external ID; a different supplied ID is
-HTTP 409. In-mempool replacements use a distinct supplied ID or a generated ID.
+A supplied external ID different from the original is HTTP 409 in both phases.
+Omit the ID or repeat the original. Pending replacements keep the original external
+ID on the same row. In-mempool replacements generate `replace_<original transaction UUID>`
+for the competitor.
 The original row retains its ID and exposes `cancelledByTransactionId` so callers
 can follow the successor.
 
