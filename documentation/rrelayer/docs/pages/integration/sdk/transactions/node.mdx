@@ -52,7 +52,18 @@ export interface TransactionSent {
 ```
 
 `null` is a successful, durably accepted submission whose broadcast hash is not available yet.
-Poll the transaction by `id`; do not resubmit it.
+Poll the transaction by `id`.
+
+An `externalId` is unique within one relayer. Repeating the original `to`, `value`,
+`data` and requested `speed` returns HTTP 200 with the same transaction ID and its
+current hash (which may be null). Omitted speed means `FAST`. A changed request,
+or a pre-upgrade row without an original request digest, returns HTTP 409 and
+creates nothing. Comparison uses the original request, even after fee bumps,
+cancellation or replacement. Blob contents are not part of this identity contract.
+Retries require the same relayer; random-relayer sends do not provide cross-relayer
+deduplication.
+
+Use `relayerClient.transaction.getByExternalId("order_12345")` for a relayer-scoped lookup. Missing transactions map to `null`.
 
 ### Sending Native Transaction
 

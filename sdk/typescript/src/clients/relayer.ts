@@ -18,6 +18,7 @@ import {
   getRelayer,
   getRelayerAllowlistAddress,
   getTransaction,
+  getTransactionByExternalIdForRelayer,
   getTransactionStatus,
   getTransactions,
   replaceTransaction,
@@ -198,6 +199,14 @@ export class RelayerClient {
 
   public get transaction() {
     return {
+      /** Get a transaction by external ID within this relayer. */
+      getByExternalId: (externalId: string): Promise<Transaction | null> => {
+        return getTransactionByExternalIdForRelayer(
+          this.id,
+          externalId,
+          this._apiBaseConfig
+        );
+      },
       /**
        * Get a transaction
        * @param transactionId The transaction id

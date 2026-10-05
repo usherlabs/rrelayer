@@ -157,6 +157,10 @@ pub struct ImportKeyResult {
     pub key_alias: String,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to methods returning an already must-use Future"
+)]
 #[async_trait]
 pub trait WalletManagerTrait: Send + Sync {
     async fn create_wallet(

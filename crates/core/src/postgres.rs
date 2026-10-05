@@ -42,6 +42,9 @@ pub enum PostgresConnectionError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum PostgresError {
+    #[error("External ID is ambiguous across relayers; use the relayer-scoped lookup")]
+    AmbiguousExternalId,
+
     #[error("PgError {0}")]
     PgError(#[from] PgError),
 

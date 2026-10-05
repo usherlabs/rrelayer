@@ -15,6 +15,8 @@ use crate::{
 use alloy::network::AnyTransactionReceipt;
 use serde_json;
 
+use super::admission::request_digest;
+
 const TRANSACTION_TABLES: [&str; 2] = ["relayer.transaction", "relayer.transaction_audit_log"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,11 +42,17 @@ impl PostgresClient {
         let mut conn = self.pool.get().await?;
         let trans = conn.transaction().await.map_err(PostgresError::PgError)?;
 
+        let digest = request_digest(
+            transaction.to,
+            transaction.value,
+            &transaction.data,
+            &transaction.speed,
+        );
         for table_name in TRANSACTION_TABLES.iter() {
             trans.execute(
                 format!("
-                INSERT INTO {}(id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, gas_limit, speed, status, expires_at, queued_at, hash, external_id, cancelled_by_transaction_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);
+                INSERT INTO {}(id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, gas_limit, speed, status, expires_at, queued_at, hash, external_id, cancelled_by_transaction_id, request_digest)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
             ", table_name).as_str(),
                 &[&transaction.id,
                     &relayer_id,
@@ -62,7 +70,8 @@ impl PostgresClient {
                     &transaction.queued_at,
                     &transaction.known_transaction_hash,
                     &transaction.external_id,
-                    &transaction.cancelled_by_transaction_id
+                    &transaction.cancelled_by_transaction_id,
+                    &digest
                 ],
             )
                 .await?;
@@ -545,11 +554,17 @@ impl PostgresClient {
         let mut conn = self.pool.get().await?;
         let trans = conn.transaction().await.map_err(PostgresError::PgError)?;
 
+        let digest = request_digest(
+            transaction.to,
+            transaction.value,
+            &transaction.data,
+            &transaction.speed,
+        );
         for table_name in TRANSACTION_TABLES.iter() {
             trans.execute(
                 format!("
-                INSERT INTO {}(id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, speed, status, expires_at, queued_at, failed_at, failed_reason, external_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15);
+                INSERT INTO {}(id, relayer_id, \"to\", \"from\", nonce, chain_id, data, value, blobs, speed, status, expires_at, queued_at, failed_at, failed_reason, external_id, request_digest)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15, $16);
                 ", table_name).as_str(),
                 &[
                     &transaction.id,
@@ -567,6 +582,7 @@ impl PostgresClient {
                     &transaction.queued_at,
                     &failed_reason.chars().take(2000).collect::<String>(),
                     &transaction.external_id,
+                    &digest,
                 ],
             )
                 .await
